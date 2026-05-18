@@ -7,10 +7,12 @@ import streamlit as st
 from openai import OpenAI
 import fitz  # PyMuPDF
 import openpyxl
-from openpyxl.utils import get_column_letter
 from datetime import datetime
 import requests
 from pathlib import Path
+import zipfile
+import shutil
+from lxml import etree
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
 MODEL = "gpt-5.4-mini"
@@ -248,38 +250,96 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
     )
     return json.loads(response.choices[0].message.content)
 
-def preencher_aba_com_tags(ws, contexto):
+def preencher_xlsx_via_zip(caminho_modelo, contexto):
     """
-    Preenche a aba localizando as tags {{chave}} e substituindo o valor.
-    Funciona com qualquer versão do openpyxl de forma segura.
+    Preenche o arquivo XLSX manipulando diretamente o ZIP interno.
+    Isso preserva 100% da estrutura, estilos, imagens e elementos complexos.
     
-    Estratégia: Itera pelas células e modifica apenas o .value,
-    mantendo automaticamente todos os estilos intactos.
+    XLSX é um arquivo ZIP contendo XML. Extraímos, modificamos o XML e recompactamos.
     """
+    # Namespaces usados no Excel
+    namespaces = {
+        'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+        'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+    }
+    
+    # Registrar namespaces para preservar prefixos
+    for prefix, uri in namespaces.items():
+        etree.register_namespace(prefix, uri)
+    
     try:
-        for row in ws.iter_rows():
-            for cell in row:
-                # Verificar se a célula tem conteúdo e se é texto
-                if cell.value is not None:
-                    valor_str = str(cell.value)
-                    texto_modificado = valor_str
-                    houve_alteracao = False
+        # Criar um diretório temporário para extrair o XLSX
+        temp_dir = io.BytesIO()
+        
+        # Ler o arquivo XLSX (que é um ZIP)
+        with zipfile.ZipFile(caminho_modelo, 'r') as zip_ref:
+            # Extrair todos os arquivos em memória
+            file_list = zip_ref.namelist()
+            file_contents = {name: zip_ref.read(name) for name in file_list}
+        
+        # Processar os arquivos XML das worksheets
+        for file_name in file_contents.keys():
+            # Worksheets estão em xl/worksheets/sheet1.xml, sheet2.xml, etc.
+            if file_name.startswith('xl/worksheets/sheet') and file_name.endswith('.xml'):
+                try:
+                    # Parse do XML
+                    xml_content = file_contents[file_name]
+                    root = etree.fromstring(xml_content)
                     
-                    # Substituir todas as tags {{chave}} pelos valores
-                    for k, v in contexto.items():
-                        tag = "{{" + k + "}}"
-                        if tag in texto_modificado:
-                            texto_substituto = str(v) if v is not None else ""
-                            texto_modificado = texto_modificado.replace(tag, texto_substituto)
-                            houve_alteracao = True
+                    # Encontrar todas as células com texto
+                    for cell in root.findall('.//c:c', namespaces):
+                        # Procurar valor em <c:v> ou <c:is><a:t>
+                        v_elem = cell.find('c:v', namespaces)
+                        
+                        if v_elem is not None and v_elem.text:
+                            texto_original = v_elem.text
+                            texto_modificado = texto_original
+                            
+                            # Substituir tags
+                            for k, v in contexto.items():
+                                tag = "{{" + k + "}}"
+                                if tag in texto_modificado:
+                                    texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+                            
+                            if texto_modificado != texto_original:
+                                v_elem.text = texto_modificado
+                        
+                        # Também processar rich text
+                        is_elem = cell.find('c:is', namespaces)
+                        if is_elem is not None:
+                            for t_elem in is_elem.findall('.//a:t', namespaces):
+                                if t_elem.text:
+                                    texto_original = t_elem.text
+                                    texto_modificado = texto_original
+                                    
+                                    for k, v in contexto.items():
+                                        tag = "{{" + k + "}}"
+                                        if tag in texto_modificado:
+                                            texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+                                    
+                                    if texto_modificado != texto_original:
+                                        t_elem.text = texto_modificado
                     
-                    # Se houve alteração, atualizar APENAS o valor da célula
-                    # Os estilos (fonte, cor, borda, alinhamento) permanecem intactos
-                    if houve_alteracao:
-                        cell.value = texto_modificado
+                    # Salvar o XML modificado
+                    file_contents[file_name] = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+                
+                except Exception as e:
+                    st.warning(f"⚠️ Erro ao processar {file_name}: {str(e)}")
+        
+        # Recompactar o ZIP
+        output_bytes = io.BytesIO()
+        with zipfile.ZipFile(output_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+            for file_name, content in file_contents.items():
+                zip_out.writestr(file_name, content)
+        
+        output_bytes.seek(0)
+        return output_bytes
     
     except Exception as e:
-        st.warning(f"⚠️ Erro ao preencher aba: {str(e)}")
+        st.error(f"❌ Erro ao processar arquivo XLSX: {str(e)}")
+        raise
 
 def criar_contexto_dados(dados):
     mat = dados.get('matricula', {})
@@ -353,29 +413,15 @@ def gerar_arquivo_final(dados):
     proprietario_1 = contexto['proprietario_1']
     
     try:
-        # Carrega o workbook preservando TODOS os formatos e estilos
-        wb_completo = openpyxl.load_workbook(
-            MODELO_ARQUIVO, 
-            data_only=False, 
-            keep_vba=True
-        )
+        st.info("📝 Preenchendo planilha via manipulação de ZIP...")
         
-        # Processar cada aba/worksheet
-        for nome_aba in wb_completo.sheetnames:
-            ws = wb_completo[nome_aba]
-            st.info(f"📋 Preenchendo aba: **{nome_aba}**")
-            preencher_aba_com_tags(ws, contexto)
+        # Usar o método de ZIP para preservar 100% da estrutura
+        arquivo_preenchido = preencher_xlsx_via_zip(MODELO_ARQUIVO, contexto)
         
-        # Salvar em BytesIO mantendo o formato XLSX intacto
-        xlsx_preenchido_io = io.BytesIO()
-        wb_completo.save(xlsx_preenchido_io)
-        xlsx_preenchido_io.seek(0)
-        wb_completo.close()
-        
-        st.success("✅ Arquivo gerado com sucesso!")
+        st.success("✅ Arquivo preenchido com sucesso! Estrutura 100% preservada!")
         
         return {
-            'arquivo_xlsx': xlsx_preenchido_io,
+            'arquivo_xlsx': arquivo_preenchido,
             'nome_proprietario': proprietario_1
         }
     except FileNotFoundError:
@@ -386,7 +432,7 @@ def gerar_arquivo_final(dados):
 # --- INTERFACE STREAMLIT ---
 st.title("🏢 Automação Documental - Prefeituras")
 st.markdown("*Selecione ou arraste os arquivos para extrair as informações e preencher os templates automaticamente.*")
-st.success("✅ O arquivo gerado manterá 100% do layout do seu modelo original!")
+st.success("✅ O arquivo gerado manterá 100% do layout, estilos e estrutura do seu modelo original!")
 
 api_key = st.text_input("OpenAI API Key (Deixe em branco se configurada no sistema):", type="password")
 if not api_key: 
@@ -502,7 +548,7 @@ if st.session_state['dados_extraidos']:
     
     if st.session_state['arquivo_gerado']:
         st.download_button(
-            label="📥 Baixar XLSX Preenchido",
+            label="📥 Baixar XLSX Preenchido (100% Preservado)",
             data=st.session_state['arquivo_gerado'],
             file_name=f"{nome_proprietario}_Memorial_Planilha_Declaração_R00.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
