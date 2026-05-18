@@ -261,29 +261,17 @@ def preencher_aba_com_tags(ws, contexto):
                 houve_alteracao = False
                 
                 for k, v in contexto.items():
-                    tag = "{{" + k + "}}"
+                    tag = "{?" + k + "}" if "{?" in texto_modificado else "{{" + k + "}}"
                     if tag in texto_modificado:
                         texto_substituto = str(v) if v is not None else ""
                         texto_modificado = texto_modificado.replace(tag, texto_substituto)
                         houve_alteracao = True
                 
                 if houve_alteracao:
-                    # Guardamos o estilo original explicitamente antes da atribuição do novo valor
-                    font_original = copy(cell.font)
-                    border_original = copy(cell.border)
-                    fill_original = copy(cell.fill)
-                    alignment_original = copy(cell.alignment)
-                    number_format_original = cell.number_format
-                    
-                    # Aplica o novo valor texto
+                    # No openpyxl, alterar apenas o atributo .value PRESERVA os estilos 
+                    # existentes na célula (fontes, cores, bordas, formatos numéricos).
+                    # Não precisamos clonar os objetos com a biblioteca 'copy'.
                     cell.value = texto_modificado
-                    
-                    # Força a reatribuição dos estilos originais na célula modificada
-                    if font_original: cell.font = font_original
-                    if border_original: cell.border = border_original
-                    if fill_original: cell.fill = fill_original
-                    if alignment_original: cell.alignment = alignment_original
-                    if number_format_original: cell.number_format = number_format_original
 
 def criar_contexto_dados(dados):
     mat = dados.get('matricula', {})
