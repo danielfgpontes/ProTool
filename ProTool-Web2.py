@@ -33,14 +33,12 @@ if 'caminho_arquivo_salvo' not in st.session_state:
 
 # --- FUNÇÕES AUXILIARES ---
 def extrair_apenas_numeros_area(valor):
-    """Filtra uma string para retornar apenas os números, vírgulas e pontos."""
     if not valor: 
         return ""
     match = re.search(r'[\d.,]+', str(valor))
     return match.group(0) if match else str(valor)
 
 def formatar_documento_detalhado(valor):
-    """Limpa o valor, aplica a máscara e retorna uma tupla: (Tipo do Documento, Número Formatado)"""
     if valor is None or str(valor).strip() == "":
         return "CPF/CNPJ:", ""
     numeros = re.sub(r'\D', '', str(valor))
@@ -249,130 +247,123 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
     )
     return json.loads(response.choices[0].message.content)
 
-def processar_fragmentos_texto(elemento_pai, contexto, namespaces):
+# --- NOVAS FUNÇÕES PARA MANIPULAÇÃO AVANÇADA DE XML EXCEL ---
+
+def iter_tags(root, tag_name):
+    """Percorre os nós ignorando as declarações rígidas de Namespace do Excel."""
+    for elem in root.iter():
+        if str(elem.tag).endswith('}' + tag_name) or elem.tag == tag_name:
+            yield elem
+
+def unificar_e_substituir_texto(elemento_pai, contexto):
     """
-    Reúne todo o texto fragmentado de um elemento <si> (shared string)
-    ou <is> (inline string), faz a substituição e, se houver alteração,
-    substitui por um único elemento <t> limpo.
+    Reúne o texto fragmentado em vários nós <t>.
+    Concentra a resposta manipulada no 1º nó e esvazia os outros, 
+    preservando totalmente as configurações originais da célula ou Caixa de Texto.
     """
-    text_nodes = elemento_pai.findall('.//c:t', namespaces)
+    text_nodes = list(iter_tags(elemento_pai, 't'))
     if not text_nodes:
         return False
 
-    texto_completo = "".join([t.text for t in text_nodes if t.text])
+    # Junta todo o texto independentemente de como o Excel o cortou
+    texto_completo = "".join([t.text or "" for t in text_nodes])
     texto_modificado = texto_completo
 
     for k, v in contexto.items():
-        tag = "{{" + k + "}}"
-        if tag in texto_modificado:
-            texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+        # Usa Regex para capturar eventuais espaços dentro das chavetas: {{   tag  }}
+        padrao = r"\{\{\s*" + re.escape(k) + r"\s*\}\}"
+        valor_str = str(v) if v is not None else ""
+        texto_modificado = re.sub(padrao, valor_str, texto_modificado)
 
     if texto_modificado != texto_completo:
-        for child in list(elemento_pai):
-            elemento_pai.remove(child)
-
-        novo_t = etree.Element(f"{{{namespaces['c']}}}t")
-        novo_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-        novo_t.text = texto_modificado
-        elemento_pai.append(novo_t)
+        # Coloca todo o texto corrigido no primeiro nó e mantém a preservação de espaços
+        text_nodes[0].text = texto_modificado
+        if "{http://www.w3.org/XML/1998/namespace}space" not in text_nodes[0].attrib:
+            text_nodes[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+            
+        # Limpa os restantes para que não fiquem palavras duplicadas ou penduradas
+        for i in range(1, len(text_nodes)):
+            text_nodes[i].text = ""
         return True
 
     return False
 
 def preencher_xlsx_via_zip(caminho_modelo, contexto):
-    """
-    Preenche o arquivo XLSX manipulando XML com lxml.
-    Resolve fragmentação de strings nativa do Excel.
-    """
     try:
         with zipfile.ZipFile(caminho_modelo, 'r') as zip_ref:
             file_list = zip_ref.namelist()
             file_contents = {name: zip_ref.read(name) for name in file_list}
         
-        st.info("📝 Processando elementos de texto...")
+        st.info("📝 A processar os elementos de texto do documento...")
         
-        namespaces = {
-            'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
-            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-            'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-            'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
-        }
-        
-        for prefix, uri in namespaces.items():
-            etree.register_namespace(prefix, uri)
-        
-        # ========== 1. PROCESSAR SHARED STRINGS ==========
-        shared_strings_paths = [f for f in file_contents.keys() if 'sharedStrings.xml' in f.lower()]
-        
-        if shared_strings_paths:
-            shared_strings_path = shared_strings_paths[0]
-            
+        # 1. SHARED STRINGS (Células normais na planilha)
+        shared_strings_paths = [f for f in file_list if 'sharedStrings.xml' in f.lower()]
+        for path in shared_strings_paths:
             try:
-                xml_content = file_contents[shared_strings_path]
-                parser = etree.XMLParser(remove_blank_text=False)
-                root = etree.fromstring(xml_content, parser=parser)
-                
-                for si_elem in root.findall('.//c:si', namespaces):
-                    processar_fragmentos_texto(si_elem, contexto, namespaces)
-                
-                file_contents[shared_strings_path] = etree.tostring(
-                    root, 
-                    xml_declaration=True, 
-                    encoding='UTF-8', 
-                    standalone=True
-                )
-            
+                xml_content = file_contents[path]
+                root = etree.fromstring(xml_content)
+                for si_elem in iter_tags(root, 'si'):
+                    unificar_e_substituir_texto(si_elem, contexto)
+                file_contents[path] = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
             except Exception as e:
-                st.warning(f"⚠️ Erro ao processar SharedStrings: {str(e)}")
+                st.warning(f"⚠️ Erro ao processar Shared Strings: {str(e)}")
         
-        # ========== 2. PROCESSAR WORKSHEETS ==========
-        st.info("📊 Processando Worksheets...")
-        
-        for file_name in list(file_contents.keys()):
-            if file_name.startswith('xl/worksheets/sheet') and file_name.endswith('.xml'):
-                try:
-                    xml_content = file_contents[file_name]
-                    parser = etree.XMLParser(remove_blank_text=False)
-                    root = etree.fromstring(xml_content, parser=parser)
-                    
-                    for is_elem in root.findall('.//c:is', namespaces):
-                        processar_fragmentos_texto(is_elem, contexto, namespaces)
-                    
-                    for v_elem in root.findall('.//c:v', namespaces):
-                        if v_elem.text and '{{' in v_elem.text:
-                            texto_modificado = v_elem.text
-                            for k, v in contexto.items():
-                                tag = "{{" + k + "}}"
-                                if tag in texto_modificado:
-                                    texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
-                            v_elem.text = texto_modificado
-                    
-                    file_contents[file_name] = etree.tostring(
-                        root, 
-                        xml_declaration=True, 
-                        encoding='UTF-8', 
-                        standalone=True
-                    )
+        # 2. DRAWINGS (Caixas de Texto e Formas - Frequente na aba "Dados")
+        drawing_paths = [f for f in file_list if f.startswith('xl/drawings/drawing') and f.endswith('.xml')]
+        for path in drawing_paths:
+            try:
+                xml_content = file_contents[path]
+                root = etree.fromstring(xml_content)
+                # Nos Drawings, os textos agrupam-se em parágrafos <p>
+                for p_elem in iter_tags(root, 'p'):
+                    unificar_e_substituir_texto(p_elem, contexto)
+                file_contents[path] = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+            except Exception as e:
+                st.warning(f"⚠️ Erro ao processar Caixas de Texto (Drawings): {str(e)}")
+
+        # 3. WORKSHEETS (Textos não catalogados ou Inlines)
+        worksheet_paths = [f for f in file_list if f.startswith('xl/worksheets/sheet') and f.endswith('.xml')]
+        for path in worksheet_paths:
+            try:
+                xml_content = file_contents[path]
+                root = etree.fromstring(xml_content)
                 
-                except Exception as e:
-                    st.warning(f"⚠️ Erro ao processar {file_name}: {str(e)}")
-        
-        # ========== 3. RECOMPACTAR ZIP ==========
-        st.info("📦 Recompactando arquivo...")
+                # Procura Strings Inline
+                for is_elem in iter_tags(root, 'is'):
+                    unificar_e_substituir_texto(is_elem, contexto)
+                
+                # Procura valores directos soltos nas células
+                for v_elem in iter_tags(root, 'v'):
+                    if v_elem.text and '{{' in v_elem.text:
+                        texto_modificado = v_elem.text
+                        for k, v in contexto.items():
+                            padrao = r"\{\{\s*" + re.escape(k) + r"\s*\}\}"
+                            valor_str = str(v) if v is not None else ""
+                            texto_modificado = re.sub(padrao, valor_str, texto_modificado)
+                        v_elem.text = texto_modificado
+                        
+                file_contents[path] = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+            except Exception as e:
+                st.warning(f"⚠️ Erro na aba Worksheet: {str(e)}")
+
+        # 4. RECOMPACTAR O ZIP FINAL
+        st.info("📦 A finalizar e selar o documento...")
         output_bytes = io.BytesIO()
         with zipfile.ZipFile(output_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_out:
             for file_name, content in file_contents.items():
                 zip_out.writestr(file_name, content)
         
         output_bytes.seek(0)
-        st.success(f"✅ Arquivo gerado com sucesso!")
+        st.success(f"✅ Arquivo compilado com sucesso!")
         return output_bytes
     
     except Exception as e:
-        st.error(f"❌ Erro ao processar arquivo XLSX: {str(e)}")
+        st.error(f"❌ Ocorreu um erro no motor XML: {str(e)}")
         import traceback
         st.error(traceback.format_exc())
         raise
+
+# --- FIM DAS NOVAS FUNÇÕES ---
 
 def criar_contexto_dados(dados):
     mat = dados.get('matricula', {})
@@ -514,21 +505,21 @@ if st.button("🚀 Processar e Gerar Documentos", type="primary"):
         ),
     }
 
-    with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo..."):
+    with st.spinner("⏳ A analisar os documentos da prefeitura e a processar os ficheiros..."):
         try:
-            st.info("📖 Extraindo dados da matrícula do imóvel...")
+            st.info("📖 A extrair os dados da matrícula do imóvel...")
             res_mat = extract_data_from_document(prompts["matricula"], f_mat, api_key) if f_mat else {}
             
-            st.info("👤 Extraindo dados do proprietário 1...")
+            st.info("👤 A extrair os dados do proprietário 1...")
             res_idf_1 = extract_data_from_document(prompts["identificacao"], f_idf_1, api_key) if f_idf_1 else {}
             
             if f_idf_2:
-                st.info("👥 Extraindo dados do proprietário 2...")
+                st.info("👥 A extrair os dados do proprietário 2...")
                 res_idf_2 = extract_data_from_document(prompts["identificacao"], f_idf_2, api_key)
             else:
                 res_idf_2 = {}
             
-            st.info("🏗️ Extraindo dados das pranchas arquitetônicas...")
+            st.info("🏗️ A extrair os dados das pranchas arquitetônicas...")
             res_prj = extract_data_from_multiple_files(prompts["projeto"], f_prj, api_key) if f_prj else {}
             
             st.session_state['dados_extraidos'] = {
