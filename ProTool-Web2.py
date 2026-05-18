@@ -14,7 +14,7 @@ import zipfile
 from lxml import etree
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-5.4-mini"
+MODEL = "gpt-4o-mini"
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
@@ -249,56 +249,48 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
     )
     return json.loads(response.choices[0].message.content)
 
-def substituir_texto_em_elemento(elemento, contexto, ns):
+def processar_fragmentos_texto(elemento_pai, contexto, namespaces):
     """
-    Recursivamente substitui tags de template em um elemento XML.
-    Preserva a estrutura XML mas modifica o conteúdo de texto.
+    Reúne todo o texto fragmentado de um elemento <si> (shared string)
+    ou <is> (inline string), faz a substituição e, se houver alteração,
+    substitui por um único elemento <t> limpo.
     """
-    # Processar o texto direto do elemento
-    if elemento.text and isinstance(elemento.text, str):
-        texto_original = elemento.text
-        texto_modificado = texto_original
-        
-        for k, v in contexto.items():
-            tag = "{{" + k + "}}"
-            if tag in texto_modificado:
-                texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
-        
-        if texto_modificado != texto_original:
-            elemento.text = texto_modificado
-    
-    # Processar o tail (texto após closing tag)
-    if elemento.tail and isinstance(elemento.tail, str):
-        texto_original = elemento.tail
-        texto_modificado = texto_original
-        
-        for k, v in contexto.items():
-            tag = "{{" + k + "}}"
-            if tag in texto_modificado:
-                texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
-        
-        if texto_modificado != texto_original:
-            elemento.tail = texto_modificado
-    
-    # Recursivamente processar filhos
-    for filho in elemento:
-        substituir_texto_em_elemento(filho, contexto, ns)
+    text_nodes = elemento_pai.findall('.//c:t', namespaces)
+    if not text_nodes:
+        return False
+
+    texto_completo = "".join([t.text for t in text_nodes if t.text])
+    texto_modificado = texto_completo
+
+    for k, v in contexto.items():
+        tag = "{{" + k + "}}"
+        if tag in texto_modificado:
+            texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+
+    if texto_modificado != texto_completo:
+        for child in list(elemento_pai):
+            elemento_pai.remove(child)
+
+        novo_t = etree.Element(f"{{{namespaces['c']}}}t")
+        novo_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        novo_t.text = texto_modificado
+        elemento_pai.append(novo_t)
+        return True
+
+    return False
 
 def preencher_xlsx_via_zip(caminho_modelo, contexto):
     """
     Preenche o arquivo XLSX manipulando XML com lxml.
-    Preserva totalmente a estrutura enquanto substitui valores.
+    Resolve fragmentação de strings nativa do Excel.
     """
     try:
-        # Ler o arquivo XLSX
         with zipfile.ZipFile(caminho_modelo, 'r') as zip_ref:
             file_list = zip_ref.namelist()
             file_contents = {name: zip_ref.read(name) for name in file_list}
         
         st.info("📝 Processando elementos de texto...")
-        tags_substituidas_total = 0
         
-        # Namespaces
         namespaces = {
             'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
             'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
@@ -306,16 +298,13 @@ def preencher_xlsx_via_zip(caminho_modelo, contexto):
             'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
         }
         
-        # Registrar namespaces
         for prefix, uri in namespaces.items():
             etree.register_namespace(prefix, uri)
         
         # ========== 1. PROCESSAR SHARED STRINGS ==========
-        shared_strings_paths = [f for f in file_contents.keys() 
-                               if 'sharedStrings.xml' in f.lower()]
+        shared_strings_paths = [f for f in file_contents.keys() if 'sharedStrings.xml' in f.lower()]
         
         if shared_strings_paths:
-            st.info("📝 Processando Shared Strings (strings compartilhadas)...")
             shared_strings_path = shared_strings_paths[0]
             
             try:
@@ -323,27 +312,15 @@ def preencher_xlsx_via_zip(caminho_modelo, contexto):
                 parser = etree.XMLParser(remove_blank_text=False)
                 root = etree.fromstring(xml_content, parser=parser)
                 
-                # Encontrar todos os elementos <si> (string item)
                 for si_elem in root.findall('.//c:si', namespaces):
-                    # Substituir em todos os elementos filhos
-                    substituir_texto_em_elemento(si_elem, contexto, namespaces)
-                    
-                    # Contar tags substituídas
-                    for elem in si_elem.iter():
-                        if elem.text:
-                            for k in contexto.keys():
-                                tag = "{{" + k + "}}"
-                                if tag not in elem.text:
-                                    tags_substituidas_total += 1
+                    processar_fragmentos_texto(si_elem, contexto, namespaces)
                 
-                # Salvar XML modificado
                 file_contents[shared_strings_path] = etree.tostring(
                     root, 
                     xml_declaration=True, 
                     encoding='UTF-8', 
                     standalone=True
                 )
-                st.success("✅ Shared Strings processado")
             
             except Exception as e:
                 st.warning(f"⚠️ Erro ao processar SharedStrings: {str(e)}")
@@ -358,14 +335,17 @@ def preencher_xlsx_via_zip(caminho_modelo, contexto):
                     parser = etree.XMLParser(remove_blank_text=False)
                     root = etree.fromstring(xml_content, parser=parser)
                     
-                    # Processar todas as células
-                    for cell in root.findall('.//c:c', namespaces):
-                        substituir_texto_em_elemento(cell, contexto, namespaces)
+                    for is_elem in root.findall('.//c:is', namespaces):
+                        processar_fragmentos_texto(is_elem, contexto, namespaces)
                     
-                    # Também processar qualquer elemento que possa conter texto
-                    for elem in root.iter():
-                        if elem.text and '{{' in (elem.text or ''):
-                            substituir_texto_em_elemento(elem, contexto, namespaces)
+                    for v_elem in root.findall('.//c:v', namespaces):
+                        if v_elem.text and '{{' in v_elem.text:
+                            texto_modificado = v_elem.text
+                            for k, v in contexto.items():
+                                tag = "{{" + k + "}}"
+                                if tag in texto_modificado:
+                                    texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+                            v_elem.text = texto_modificado
                     
                     file_contents[file_name] = etree.tostring(
                         root, 
@@ -385,7 +365,7 @@ def preencher_xlsx_via_zip(caminho_modelo, contexto):
                 zip_out.writestr(file_name, content)
         
         output_bytes.seek(0)
-        st.success(f"✅ Arquivo recompactado com sucesso!")
+        st.success(f"✅ Arquivo gerado com sucesso!")
         return output_bytes
     
     except Exception as e:
