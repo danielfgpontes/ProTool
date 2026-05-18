@@ -14,7 +14,7 @@ import zipfile
 from lxml import etree
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-4o-mini"
+MODEL = "gpt-5.4-mini"
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
