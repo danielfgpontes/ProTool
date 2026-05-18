@@ -11,11 +11,10 @@ from datetime import datetime
 import requests
 from pathlib import Path
 import zipfile
-import shutil
 from lxml import etree
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-5.4-mini"
+MODEL = "gpt-4o-mini"
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
@@ -253,63 +252,109 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
 def preencher_xlsx_via_zip(caminho_modelo, contexto):
     """
     Preenche o arquivo XLSX manipulando diretamente o ZIP interno.
-    Isso preserva 100% da estrutura, estilos, imagens e elementos complexos.
     
-    XLSX é um arquivo ZIP contendo XML. Extraímos, modificamos o XML e recompactamos.
+    Processa:
+    1. Worksheets direto (células com valores inline)
+    2. SharedStrings.xml (strings compartilhadas) - PRINCIPAL!
+    3. Rich text em worksheets
     """
-    # Namespaces usados no Excel
     namespaces = {
         'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
         'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-        'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
     }
     
-    # Registrar namespaces para preservar prefixos
     for prefix, uri in namespaces.items():
         etree.register_namespace(prefix, uri)
     
     try:
-        # Criar um diretório temporário para extrair o XLSX
-        temp_dir = io.BytesIO()
-        
         # Ler o arquivo XLSX (que é um ZIP)
         with zipfile.ZipFile(caminho_modelo, 'r') as zip_ref:
-            # Extrair todos os arquivos em memória
             file_list = zip_ref.namelist()
             file_contents = {name: zip_ref.read(name) for name in file_list}
         
-        # Processar os arquivos XML das worksheets
-        for file_name in file_contents.keys():
-            # Worksheets estão em xl/worksheets/sheet1.xml, sheet2.xml, etc.
-            if file_name.startswith('xl/worksheets/sheet') and file_name.endswith('.xml'):
-                try:
-                    # Parse do XML
-                    xml_content = file_contents[file_name]
-                    root = etree.fromstring(xml_content)
-                    
-                    # Encontrar todas as células com texto
-                    for cell in root.findall('.//c:c', namespaces):
-                        # Procurar valor em <c:v> ou <c:is><a:t>
-                        v_elem = cell.find('c:v', namespaces)
-                        
-                        if v_elem is not None and v_elem.text:
-                            texto_original = v_elem.text
+        # ========== PROCESSAR SHARED STRINGS ==========
+        # Este é o arquivo principal que contém as strings compartilhadas
+        shared_strings_paths = [f for f in file_contents.keys() 
+                               if 'sharedStrings.xml' in f.lower()]
+        
+        if shared_strings_paths:
+            st.info("📝 Processando Shared Strings (strings compartilhadas)...")
+            shared_strings_path = shared_strings_paths[0]
+            
+            try:
+                xml_content = file_contents[shared_strings_path]
+                root = etree.fromstring(xml_content)
+                
+                # Namespace para sharedStrings
+                ns = {'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+                      'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+                
+                # Encontrar todos os <si> (string item) e seus <t> (text)
+                for si_elem in root.findall('.//c:si', ns):
+                    for t_elem in si_elem.findall('.//c:t', ns):
+                        if t_elem.text:
+                            texto_original = t_elem.text
                             texto_modificado = texto_original
                             
                             # Substituir tags
                             for k, v in contexto.items():
                                 tag = "{{" + k + "}}"
                                 if tag in texto_modificado:
-                                    texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+                                    texto_modificado = texto_modificado.replace(
+                                        tag, str(v) if v is not None else ""
+                                    )
+                            
+                            if texto_modificado != texto_original:
+                                t_elem.text = texto_modificado
+                                st.success(f"✅ String substituída: {texto_original[:30]}...")
+                
+                # Salvar SharedStrings modificado
+                file_contents[shared_strings_path] = etree.tostring(
+                    root, 
+                    xml_declaration=True, 
+                    encoding='UTF-8', 
+                    standalone=True
+                )
+            
+            except Exception as e:
+                st.warning(f"⚠️ Erro ao processar SharedStrings: {str(e)}")
+        
+        # ========== PROCESSAR WORKSHEETS (valores inline) ==========
+        # Também processa worksheets para valores que não estão em SharedStrings
+        st.info("📊 Processando Worksheets...")
+        
+        for file_name in file_contents.keys():
+            if file_name.startswith('xl/worksheets/sheet') and file_name.endswith('.xml'):
+                try:
+                    xml_content = file_contents[file_name]
+                    root = etree.fromstring(xml_content)
+                    
+                    ns = {'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+                          'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+                    
+                    # Células com valores inline
+                    for cell in root.findall('.//c:c', ns):
+                        v_elem = cell.find('c:v', ns)
+                        
+                        if v_elem is not None and v_elem.text:
+                            texto_original = v_elem.text
+                            texto_modificado = texto_original
+                            
+                            for k, v in contexto.items():
+                                tag = "{{" + k + "}}"
+                                if tag in texto_modificado:
+                                    texto_modificado = texto_modificado.replace(
+                                        tag, str(v) if v is not None else ""
+                                    )
                             
                             if texto_modificado != texto_original:
                                 v_elem.text = texto_modificado
                         
-                        # Também processar rich text
-                        is_elem = cell.find('c:is', namespaces)
+                        # Rich text
+                        is_elem = cell.find('c:is', ns)
                         if is_elem is not None:
-                            for t_elem in is_elem.findall('.//a:t', namespaces):
+                            for t_elem in is_elem.findall('.//a:t', ns):
                                 if t_elem.text:
                                     texto_original = t_elem.text
                                     texto_modificado = texto_original
@@ -317,24 +362,32 @@ def preencher_xlsx_via_zip(caminho_modelo, contexto):
                                     for k, v in contexto.items():
                                         tag = "{{" + k + "}}"
                                         if tag in texto_modificado:
-                                            texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
+                                            texto_modificado = texto_modificado.replace(
+                                                tag, str(v) if v is not None else ""
+                                            )
                                     
                                     if texto_modificado != texto_original:
                                         t_elem.text = texto_modificado
                     
-                    # Salvar o XML modificado
-                    file_contents[file_name] = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+                    file_contents[file_name] = etree.tostring(
+                        root, 
+                        xml_declaration=True, 
+                        encoding='UTF-8', 
+                        standalone=True
+                    )
                 
                 except Exception as e:
                     st.warning(f"⚠️ Erro ao processar {file_name}: {str(e)}")
         
-        # Recompactar o ZIP
+        # ========== RECOMPACTAR ZIP ==========
+        st.info("📦 Recompactando arquivo...")
         output_bytes = io.BytesIO()
         with zipfile.ZipFile(output_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_out:
             for file_name, content in file_contents.items():
                 zip_out.writestr(file_name, content)
         
         output_bytes.seek(0)
+        st.success("✅ Arquivo recompactado com sucesso!")
         return output_bytes
     
     except Exception as e:
@@ -379,13 +432,11 @@ def criar_contexto_dados(dados):
         'confrontacao_lado_direito': str(mat.get('confrontacao_lado_direito', '')).upper(),
         'confrontacao_lado_esquerdo': str(mat.get('confrontacao_lado_esquerdo', '')).upper(),
 
-        # Proprietário 1
         'proprietario_1': str(idf1.get('proprietario', '')).upper(),
         'tipo_doc_1': tipo_doc_1.replace(':', ''),
         'num_doc_1': num_doc_1,
         'doc_completo_1': f"{tipo_doc_1} {num_doc_1}" if num_doc_1 else "",
 
-        # Proprietário 2
         'proprietario_2': str(idf2.get('proprietario', '')).upper() if idf2.get('proprietario') else "",
         'tipo_doc_2': tipo_doc_2.replace(':', ''),
         'num_doc_2': num_doc_2,
@@ -414,8 +465,6 @@ def gerar_arquivo_final(dados):
     
     try:
         st.info("📝 Preenchendo planilha via manipulação de ZIP...")
-        
-        # Usar o método de ZIP para preservar 100% da estrutura
         arquivo_preenchido = preencher_xlsx_via_zip(MODELO_ARQUIVO, contexto)
         
         st.success("✅ Arquivo preenchido com sucesso! Estrutura 100% preservada!")
@@ -485,7 +534,7 @@ if st.button("🚀 Processar e Gerar Documentos", type="primary"):
         ),
     }
 
-    with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo... Isso pode levar alguns segundos."):
+    with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo..."):
         try:
             st.info("📖 Extraindo dados da matrícula do imóvel...")
             res_mat = extract_data_from_document(prompts["matricula"], f_mat, api_key) if f_mat else {}
@@ -509,7 +558,6 @@ if st.button("🚀 Processar e Gerar Documentos", type="primary"):
                 "projeto": res_prj
             }
             
-            st.info("📝 Gerando arquivo final com preenchimento automático...")
             resultado = gerar_arquivo_final(st.session_state['dados_extraidos'])
             
             st.session_state['arquivo_gerado'] = resultado['arquivo_xlsx']
@@ -521,42 +569,33 @@ if st.button("🚀 Processar e Gerar Documentos", type="primary"):
                 
                 if caminho_salvo:
                     st.session_state['caminho_arquivo_salvo'] = caminho_salvo
-                    st.success(f"✅ Arquivo salvo automaticamente em:\n`{caminho_salvo}`")
+                    st.success(f"✅ Arquivo salvo em: `{caminho_salvo}`")
                 else:
-                    st.warning("⚠️ Não foi possível salvar o arquivo automaticamente. Use o botão de download.")
-            else:
-                st.warning("⚠️ Não foi possível determinar a pasta de origem. Use o botão de download.")
+                    st.warning("⚠️ Use o botão de download abaixo.")
             
-            st.success("✅✅✅ Análise documental finalizada com SUCESSO!")
+            st.success("✅✅✅ Análise finalizada!")
             
         except Exception as e:
-            st.error(f"❌ Erro no processamento: {e}")
+            st.error(f"❌ Erro: {e}")
             import traceback
             st.error(traceback.format_exc())
 
-# --- EXIBIÇÃO E BOTÕES DE DOWNLOAD ---
+# --- DOWNLOAD ---
 if st.session_state['dados_extraidos']:
     st.divider()
-    st.subheader("📄 Documento Pronto para Download")
+    st.subheader("📄 Documento Pronto")
     
     nome_proprietario = st.session_state['nome_proprietario']
     
-    if st.session_state['caminho_arquivo_salvo']:
-        st.success(f"✅ Arquivo salvo em: `{st.session_state['caminho_arquivo_salvo']}`")
-    else:
-        st.info("💾 Você pode fazer download do arquivo abaixo:")
-    
     if st.session_state['arquivo_gerado']:
         st.download_button(
-            label="📥 Baixar XLSX Preenchido (100% Preservado)",
+            label="📥 Baixar XLSX Preenchido",
             data=st.session_state['arquivo_gerado'],
             file_name=f"{nome_proprietario}_Memorial_Planilha_Declaração_R00.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="xlsx_download"
         )
-    else:
-        st.error("❌ Erro ao gerar XLSX")
-
+    
     st.divider()
-    with st.expander("📊 Ver Dados Brutos Extraídos (JSON)"):
+    with st.expander("📊 Ver Dados Extraídos (JSON)"):
         st.json(st.session_state['dados_extraidos'])
