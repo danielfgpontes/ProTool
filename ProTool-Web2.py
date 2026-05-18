@@ -249,137 +249,143 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
     )
     return json.loads(response.choices[0].message.content)
 
-def preencher_xlsx_via_zip(caminho_modelo, contexto):
+def inspecionar_tags_arquivo(caminho_modelo):
     """
-    Preenche o arquivo XLSX manipulando diretamente o ZIP interno.
-    
-    Processa:
-    1. Worksheets direto (células com valores inline)
-    2. SharedStrings.xml (strings compartilhadas) - PRINCIPAL!
-    3. Rich text em worksheets
+    Inspeciona o arquivo para encontrar exatamente como as tags estão armazenadas.
     """
-    namespaces = {
-        'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-    }
-    
-    for prefix, uri in namespaces.items():
-        etree.register_namespace(prefix, uri)
+    st.info("🔍 Inspecionando arquivo para encontrar tags...")
     
     try:
-        # Ler o arquivo XLSX (que é um ZIP)
         with zipfile.ZipFile(caminho_modelo, 'r') as zip_ref:
             file_list = zip_ref.namelist()
             file_contents = {name: zip_ref.read(name) for name in file_list}
         
-        # ========== PROCESSAR SHARED STRINGS ==========
-        # Este é o arquivo principal que contém as strings compartilhadas
+        tags_encontradas = []
+        
+        # Procurar em SharedStrings
         shared_strings_paths = [f for f in file_contents.keys() 
                                if 'sharedStrings.xml' in f.lower()]
         
         if shared_strings_paths:
-            st.info("📝 Processando Shared Strings (strings compartilhadas)...")
+            xml_content = file_contents[shared_strings_paths[0]]
+            # Buscar por padrão de tags usando regex
+            matches = re.findall(r'\{\{[a-z_]+\}\}', xml_content.decode('utf-8', errors='ignore'), re.IGNORECASE)
+            tags_encontradas.extend(set(matches))
+        
+        # Procurar em Worksheets
+        for file_name in file_contents.keys():
+            if 'worksheets/sheet' in file_name and file_name.endswith('.xml'):
+                xml_content = file_contents[file_name]
+                matches = re.findall(r'\{\{[a-z_]+\}\}', xml_content.decode('utf-8', errors='ignore'), re.IGNORECASE)
+                tags_encontradas.extend(set(matches))
+        
+        if tags_encontradas:
+            st.success(f"✅ Tags encontradas no arquivo: {set(tags_encontradas)}")
+            return True
+        else:
+            st.warning("⚠️ Nenhuma tag {{...}} encontrada no arquivo")
+            return False
+    
+    except Exception as e:
+        st.error(f"Erro ao inspecionar: {e}")
+        return False
+
+def preencher_xlsx_via_zip(caminho_modelo, contexto):
+    """
+    Preenche o arquivo XLSX manipulando diretamente o ZIP interno.
+    Processa TODOS os locais onde strings podem estar armazenadas.
+    """
+    try:
+        # Ler o arquivo XLSX
+        with zipfile.ZipFile(caminho_modelo, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+            file_contents = {name: zip_ref.read(name) for name in file_list}
+        
+        tags_substituidas = 0
+        
+        # ========== 1. PROCESSAR SHARED STRINGS ==========
+        shared_strings_paths = [f for f in file_contents.keys() 
+                               if 'sharedStrings.xml' in f.lower()]
+        
+        if shared_strings_paths:
+            st.info("📝 Processando Shared Strings...")
             shared_strings_path = shared_strings_paths[0]
             
             try:
                 xml_content = file_contents[shared_strings_path]
-                root = etree.fromstring(xml_content)
                 
-                # Namespace para sharedStrings
-                ns = {'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
-                      'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+                # Usar regex para encontrar e substituir tags DIRETAMENTE no XML
+                for k, v in contexto.items():
+                    tag = "{{" + k + "}}"
+                    valor_str = str(v) if v is not None else ""
+                    
+                    # Substituir no conteúdo bruto (antes de parsear XML)
+                    xml_content = xml_content.replace(
+                        tag.encode('utf-8'), 
+                        valor_str.encode('utf-8')
+                    )
                 
-                # Encontrar todos os <si> (string item) e seus <t> (text)
-                for si_elem in root.findall('.//c:si', ns):
-                    for t_elem in si_elem.findall('.//c:t', ns):
-                        if t_elem.text:
-                            texto_original = t_elem.text
-                            texto_modificado = texto_original
-                            
-                            # Substituir tags
-                            for k, v in contexto.items():
-                                tag = "{{" + k + "}}"
-                                if tag in texto_modificado:
-                                    texto_modificado = texto_modificado.replace(
-                                        tag, str(v) if v is not None else ""
-                                    )
-                            
-                            if texto_modificado != texto_original:
-                                t_elem.text = texto_modificado
-                                st.success(f"✅ String substituída: {texto_original[:30]}...")
+                # Salvar XML modificado
+                file_contents[shared_strings_path] = xml_content
                 
-                # Salvar SharedStrings modificado
-                file_contents[shared_strings_path] = etree.tostring(
-                    root, 
-                    xml_declaration=True, 
-                    encoding='UTF-8', 
-                    standalone=True
-                )
+                # Contar substituições
+                for k, v in contexto.items():
+                    tag = "{{" + k + "}}"
+                    if tag in xml_content.decode('utf-8', errors='ignore'):
+                        st.warning(f"⚠️ Tag {tag} ainda não foi substituída")
+                    else:
+                        tags_substituidas += 1
             
             except Exception as e:
                 st.warning(f"⚠️ Erro ao processar SharedStrings: {str(e)}")
         
-        # ========== PROCESSAR WORKSHEETS (valores inline) ==========
-        # Também processa worksheets para valores que não estão em SharedStrings
+        # ========== 2. PROCESSAR WORKSHEETS ==========
         st.info("📊 Processando Worksheets...")
         
-        for file_name in file_contents.keys():
+        for file_name in list(file_contents.keys()):
             if file_name.startswith('xl/worksheets/sheet') and file_name.endswith('.xml'):
                 try:
                     xml_content = file_contents[file_name]
-                    root = etree.fromstring(xml_content)
                     
-                    ns = {'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
-                          'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
-                    
-                    # Células com valores inline
-                    for cell in root.findall('.//c:c', ns):
-                        v_elem = cell.find('c:v', ns)
+                    # Substituir tags no conteúdo bruto
+                    for k, v in contexto.items():
+                        tag = "{{" + k + "}}"
+                        valor_str = str(v) if v is not None else ""
                         
-                        if v_elem is not None and v_elem.text:
-                            texto_original = v_elem.text
-                            texto_modificado = texto_original
-                            
-                            for k, v in contexto.items():
-                                tag = "{{" + k + "}}"
-                                if tag in texto_modificado:
-                                    texto_modificado = texto_modificado.replace(
-                                        tag, str(v) if v is not None else ""
-                                    )
-                            
-                            if texto_modificado != texto_original:
-                                v_elem.text = texto_modificado
-                        
-                        # Rich text
-                        is_elem = cell.find('c:is', ns)
-                        if is_elem is not None:
-                            for t_elem in is_elem.findall('.//a:t', ns):
-                                if t_elem.text:
-                                    texto_original = t_elem.text
-                                    texto_modificado = texto_original
-                                    
-                                    for k, v in contexto.items():
-                                        tag = "{{" + k + "}}"
-                                        if tag in texto_modificado:
-                                            texto_modificado = texto_modificado.replace(
-                                                tag, str(v) if v is not None else ""
-                                            )
-                                    
-                                    if texto_modificado != texto_original:
-                                        t_elem.text = texto_modificado
+                        xml_content = xml_content.replace(
+                            tag.encode('utf-8'), 
+                            valor_str.encode('utf-8')
+                        )
                     
-                    file_contents[file_name] = etree.tostring(
-                        root, 
-                        xml_declaration=True, 
-                        encoding='UTF-8', 
-                        standalone=True
-                    )
+                    file_contents[file_name] = xml_content
                 
                 except Exception as e:
                     st.warning(f"⚠️ Erro ao processar {file_name}: {str(e)}")
         
-        # ========== RECOMPACTAR ZIP ==========
+        # ========== 3. PROCESSAR COMMENTS ==========
+        # Às vezes tags estão em comentários (não visíveis)
+        st.info("💬 Processando Comentários...")
+        
+        for file_name in list(file_contents.keys()):
+            if 'comments' in file_name.lower() and file_name.endswith('.xml'):
+                try:
+                    xml_content = file_contents[file_name]
+                    
+                    for k, v in contexto.items():
+                        tag = "{{" + k + "}}"
+                        valor_str = str(v) if v is not None else ""
+                        
+                        xml_content = xml_content.replace(
+                            tag.encode('utf-8'), 
+                            valor_str.encode('utf-8')
+                        )
+                    
+                    file_contents[file_name] = xml_content
+                
+                except Exception as e:
+                    pass
+        
+        # ========== 4. RECOMPACTAR ZIP ==========
         st.info("📦 Recompactando arquivo...")
         output_bytes = io.BytesIO()
         with zipfile.ZipFile(output_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_out:
@@ -387,7 +393,7 @@ def preencher_xlsx_via_zip(caminho_modelo, contexto):
                 zip_out.writestr(file_name, content)
         
         output_bytes.seek(0)
-        st.success("✅ Arquivo recompactado com sucesso!")
+        st.success(f"✅ Arquivo recompactado! {tags_substituidas} tags processadas")
         return output_bytes
     
     except Exception as e:
@@ -464,10 +470,13 @@ def gerar_arquivo_final(dados):
     proprietario_1 = contexto['proprietario_1']
     
     try:
-        st.info("📝 Preenchendo planilha via manipulação de ZIP...")
+        # Primeiro, inspecionar o arquivo
+        inspecionar_tags_arquivo(MODELO_ARQUIVO)
+        
+        st.info("📝 Preenchendo planilha...")
         arquivo_preenchido = preencher_xlsx_via_zip(MODELO_ARQUIVO, contexto)
         
-        st.success("✅ Arquivo preenchido com sucesso! Estrutura 100% preservada!")
+        st.success("✅ Arquivo preenchido com sucesso!")
         
         return {
             'arquivo_xlsx': arquivo_preenchido,
@@ -481,7 +490,7 @@ def gerar_arquivo_final(dados):
 # --- INTERFACE STREAMLIT ---
 st.title("🏢 Automação Documental - Prefeituras")
 st.markdown("*Selecione ou arraste os arquivos para extrair as informações e preencher os templates automaticamente.*")
-st.success("✅ O arquivo gerado manterá 100% do layout, estilos e estrutura do seu modelo original!")
+st.success("✅ O arquivo gerado manterá 100% do layout do seu modelo original!")
 
 api_key = st.text_input("OpenAI API Key (Deixe em branco se configurada no sistema):", type="password")
 if not api_key: 
