@@ -11,10 +11,9 @@ from openpyxl.utils import get_column_letter
 from datetime import datetime
 import requests
 from pathlib import Path
-from lxml import etree
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-5.4-mini"
+MODEL = "gpt-4o-mini"
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
@@ -249,92 +248,38 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
     )
     return json.loads(response.choices[0].message.content)
 
-def preencher_aba_com_tags_xml(ws, contexto):
+def preencher_aba_com_tags(ws, contexto):
     """
-    Preenche a aba manipulando diretamente o XML subjacente da worksheet.
-    Isso preserva 100% da formatação original, estilos, cores, bordas, etc.
+    Preenche a aba localizando as tags {{chave}} e substituindo o valor.
+    Funciona com qualquer versão do openpyxl de forma segura.
     
-    O XML do Excel é armazenado em ws._element, e modificar texto lá
-    preserva todas as propriedades de formatação associadas à célula.
+    Estratégia: Itera pelas células e modifica apenas o .value,
+    mantendo automaticamente todos os estilos intactos.
     """
-    # Registrar o namespace padrão do Excel
-    ns = {
-        'c': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-    }
-    
     try:
-        # Acessar o elemento XML raiz da worksheet
-        xml_root = ws._element
-        
-        # Iterar por todas as linhas e células no XML
-        for row_elem in xml_root.findall('.//c:c', ns):
-            # Procurar pelo elemento de texto (t) dentro de cada célula
-            # Pode estar em <c:v> (valor) ou em <c:is>/<a:t> (texto rich)
-            
-            # Caso 1: Valor simples em <c:v>
-            v_elem = row_elem.find('c:v', ns)
-            if v_elem is not None and v_elem.text:
-                texto_original = v_elem.text
-                texto_modificado = texto_original
-                
-                # Substituir todas as tags
-                for k, v in contexto.items():
-                    tag = "{{" + k + "}}"
-                    if tag in texto_modificado:
-                        texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
-                
-                # Se houve mudança, atualizar o XML
-                if texto_modificado != texto_original:
-                    v_elem.text = texto_modificado
-            
-            # Caso 2: Texto rich em <c:is><a:t>
-            is_elem = row_elem.find('c:is', ns)
-            if is_elem is not None:
-                # Namespace para o texto rich (DrawingML)
-                ns_a = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
-                
-                for t_elem in is_elem.findall('.//a:t', ns_a):
-                    if t_elem.text:
-                        texto_original = t_elem.text
-                        texto_modificado = texto_original
-                        
-                        # Substituir todas as tags
-                        for k, v in contexto.items():
-                            tag = "{{" + k + "}}"
-                            if tag in texto_modificado:
-                                texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
-                        
-                        # Se houve mudança, atualizar o XML
-                        if texto_modificado != texto_original:
-                            t_elem.text = texto_modificado
-            
-            # Caso 3: String compartilhada (menos comum, mas possível)
-            r_elem = row_elem.find('c:v', ns)
-            if r_elem is not None:
-                # Este caso é raro em arquivos típicos
-                pass
+        for row in ws.iter_rows():
+            for cell in row:
+                # Verificar se a célula tem conteúdo e se é texto
+                if cell.value is not None:
+                    valor_str = str(cell.value)
+                    texto_modificado = valor_str
+                    houve_alteracao = False
+                    
+                    # Substituir todas as tags {{chave}} pelos valores
+                    for k, v in contexto.items():
+                        tag = "{{" + k + "}}"
+                        if tag in texto_modificado:
+                            texto_substituto = str(v) if v is not None else ""
+                            texto_modificado = texto_modificado.replace(tag, texto_substituto)
+                            houve_alteracao = True
+                    
+                    # Se houve alteração, atualizar APENAS o valor da célula
+                    # Os estilos (fonte, cor, borda, alinhamento) permanecem intactos
+                    if houve_alteracao:
+                        cell.value = texto_modificado
     
     except Exception as e:
-        st.warning(f"⚠️ Erro ao processar XML da worksheet: {str(e)}")
-        # Fallback para método tradicional se XML falhar
-        preencher_aba_com_tags_fallback(ws, contexto)
-
-def preencher_aba_com_tags_fallback(ws, contexto):
-    """
-    Fallback se o método XML falhar.
-    Mantém a compatibilidade mas pode perder algumas formatações complexas.
-    """
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value and isinstance(cell.value, str):
-                texto_modificado = cell.value
-                
-                for k, v in contexto.items():
-                    tag = "{{" + k + "}}"
-                    if tag in texto_modificado:
-                        texto_modificado = texto_modificado.replace(tag, str(v) if v is not None else "")
-                
-                cell.value = texto_modificado
+        st.warning(f"⚠️ Erro ao preencher aba: {str(e)}")
 
 def criar_contexto_dados(dados):
     mat = dados.get('matricula', {})
@@ -408,9 +353,7 @@ def gerar_arquivo_final(dados):
     proprietario_1 = contexto['proprietario_1']
     
     try:
-        # Carrega o workbook preservando TODOS os formatos
-        # data_only=False mantém fórmulas intactas
-        # keep_vba=True preserva VBA se existir
+        # Carrega o workbook preservando TODOS os formatos e estilos
         wb_completo = openpyxl.load_workbook(
             MODELO_ARQUIVO, 
             data_only=False, 
@@ -421,9 +364,7 @@ def gerar_arquivo_final(dados):
         for nome_aba in wb_completo.sheetnames:
             ws = wb_completo[nome_aba]
             st.info(f"📋 Preenchendo aba: **{nome_aba}**")
-            
-            # Usar o método XML para preservar formatação 100%
-            preencher_aba_com_tags_xml(ws, contexto)
+            preencher_aba_com_tags(ws, contexto)
         
         # Salvar em BytesIO mantendo o formato XLSX intacto
         xlsx_preenchido_io = io.BytesIO()
@@ -431,21 +372,21 @@ def gerar_arquivo_final(dados):
         xlsx_preenchido_io.seek(0)
         wb_completo.close()
         
-        st.success("✅ Arquivo gerado com sucesso! Formatação preservada em 100%.")
+        st.success("✅ Arquivo gerado com sucesso!")
         
         return {
             'arquivo_xlsx': xlsx_preenchido_io,
             'nome_proprietario': proprietario_1
         }
     except FileNotFoundError:
-        raise FileNotFoundError(f"Arquivo '{MODELO_ARQUIVO}' não encontrado. Verifique se o arquivo modelo está no diretório.")
+        raise FileNotFoundError(f"Arquivo '{MODELO_ARQUIVO}' não encontrado no diretório.")
     except Exception as e:
         raise Exception(f"Erro ao gerar arquivo: {str(e)}")
 
 # --- INTERFACE STREAMLIT ---
 st.title("🏢 Automação Documental - Prefeituras")
 st.markdown("*Selecione ou arraste os arquivos para extrair as informações e preencher os templates automaticamente.*")
-st.success("✅ Usando transclusions XML - O arquivo gerado manterá 100% do layout do seu modelo original!")
+st.success("✅ O arquivo gerado manterá 100% do layout do seu modelo original!")
 
 api_key = st.text_input("OpenAI API Key (Deixe em branco se configurada no sistema):", type="password")
 if not api_key: 
@@ -540,7 +481,7 @@ if st.button("🚀 Processar e Gerar Documentos", type="primary"):
             else:
                 st.warning("⚠️ Não foi possível determinar a pasta de origem. Use o botão de download.")
             
-            st.success("✅✅✅ Análise documental finalizada com SUCESSO! Formatação 100% preservada!")
+            st.success("✅✅✅ Análise documental finalizada com SUCESSO!")
             
         except Exception as e:
             st.error(f"❌ Erro no processamento: {e}")
@@ -561,7 +502,7 @@ if st.session_state['dados_extraidos']:
     
     if st.session_state['arquivo_gerado']:
         st.download_button(
-            label="📥 Baixar XLSX Preenchido (100% Formatação Preservada)",
+            label="📥 Baixar XLSX Preenchido",
             data=st.session_state['arquivo_gerado'],
             file_name=f"{nome_proprietario}_Memorial_Planilha_Declaração_R00.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
