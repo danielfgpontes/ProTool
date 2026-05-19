@@ -1,5 +1,5 @@
 PyMuPDF
-openai==2.37.0
-openpyxl==3.1.5
-Requests==2.34.2
-streamlit==1.45.1
+openai
+openpyxl
+Requests
+streamlit
