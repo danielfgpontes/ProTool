@@ -266,6 +266,20 @@ def buscar_cep_por_endereco(rua, cidade, estado, loteamento=""):
     Returns:
         CEP formatado (XXXXX-XXX) ou vazio se não encontrado
     """
+
+    # ... seu código anterior ...
+        url = f"https://viacep.com.br/ws/{estado_limpo}/{cidade_limpa}/{rua_limpa}/json/"
+        
+        st.info(f"🌐 URL da API: `{url}`")
+        
+        # 1. Crie um dicionário com um User-Agent de navegador
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        # 2. Adicione os headers na requisição
+        response = requests.get(url, headers=headers, timeout=5)
+        # ... continuação do seu código ...
     try:
         if not rua or not cidade or not estado:
             st.warning("⚠️ Dados insuficientes para buscar CEP (rua, cidade ou estado vazio)")
