@@ -305,17 +305,24 @@ def buscar_cep_por_endereco(rua, cidade, estado, loteamento=""):
         
         # API ViaCEP - busca por endereço
         # Formato: https://viacep.com.br/ws/[UF]/[cidade]/[logradouro]/json/
-        url = f"https://viacep.com.br/ws/{estado_limpo}/{cidade_limpa}/{rua_limpa}/json/"
+        # API ViaCEP original
+        url_viacep = f"https://viacep.com.br/ws/{estado_limpo}/{cidade_limpa}/{rua_limpa}/json/"
         
-        st.info(f"🌐 URL da API: `{url}`")
+        st.info(f"🌐 Buscando CEP via Proxy Seguro...")
         
+        # 1. Configurando o Proxy AllOrigins
+        url_proxy = "https://api.allorigins.win/raw"
+        parametros = {"url": url_viacep}
+        
+        # 2. Mantemos o User-Agent por garantia
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         
-        response = requests.get(url, headers=headers, timeout=5)
+        # 3. Fazendo a requisição através do proxy (aumentei o timeout para 10s pois o proxy adiciona um pequeno atraso)
+        response = requests.get(url_proxy, params=parametros, headers=headers, timeout=10)
         
-        st.info(f"📡 Status HTTP: {response.status_code}")
+        st.info(f"📡 Status HTTP (Proxy): {response.status_code}")
         
         if response.status_code == 200:
             dados = response.json()
