@@ -12,7 +12,7 @@ import requests
 from pathlib import Path
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-5.4-mini"
+MODEL = "gpt-4o-mini"
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
@@ -28,6 +28,8 @@ if 'pasta_origem' not in st.session_state:
     st.session_state['pasta_origem'] = None
 if 'caminho_arquivo_salvo' not in st.session_state:
     st.session_state['caminho_arquivo_salvo'] = None
+if 'cache_ceps' not in st.session_state:
+    st.session_state['cache_ceps'] = {}
 
 # --- FUNÇÕES AUXILIARES ---
 def extrair_apenas_numeros_area(valor):
@@ -58,19 +60,15 @@ def formatar_cep(cep_bruto):
     Exemplos:
     - "78894588" -> "78894-588"
     - "78894-588" -> "78894-588"
-    - "78894--588" -> "78894-588"
     """
     if not cep_bruto:
         return ""
     
-    # Remove todos os caracteres que não são dígitos
     cep_limpo = re.sub(r'\D', '', str(cep_bruto))
     
-    # Verifica se tem 8 dígitos
     if len(cep_limpo) != 8:
-        return cep_bruto  # Retorna como estava se não tiver 8 dígitos
+        return cep_bruto
     
-    # Formata: XXXXX-XXX
     cep_formatado = f"{cep_limpo[:5]}-{cep_limpo[5:]}"
     
     return cep_formatado
@@ -78,12 +76,7 @@ def formatar_cep(cep_bruto):
 def extrair_termos_significativos(texto):
     """
     Extrai termos significativos de um texto, ignorando palavras genéricas.
-    
-    Exemplo:
-    - "Bairro Parque dos Poderes" -> ["PARQUE", "PODERES"]
-    - "Loteamento Residencial Jardim Sul" -> ["RESIDENCIAL", "JARDIM", "SUL"]
     """
-    
     termos_ignorar = [
         'bairro', 'loteamento', 'jardim', 'jd', 'residencial', 'comercial',
         'industrial', 'parque', 'condomínio', 'cond', 'avenida', 'av', 'rua',
@@ -95,15 +88,12 @@ def extrair_termos_significativos(texto):
     if not texto:
         return []
     
-    # Remove números e caracteres especiais
     texto_limpo = re.sub(r'\d+', '', str(texto)).strip()
     texto_limpo = re.sub(r'[^\w\s]', ' ', texto_limpo)
     texto_limpo = re.sub(r'\s+', ' ', texto_limpo).strip()
     
-    # Separa em palavras
     palavras = texto_limpo.upper().split()
     
-    # Filtra termos significativos
     termos_significativos = [p for p in palavras if p.lower() not in termos_ignorar]
     
     return termos_significativos
@@ -111,22 +101,13 @@ def extrair_termos_significativos(texto):
 def selecionar_cep_por_loteamento(resultados_cep, loteamento):
     """
     Compara múltiplos resultados de CEP com o loteamento e seleciona o mais apropriado.
-    
-    Args:
-        resultados_cep: Lista de resultados da API ViaCEP
-        loteamento: Nome do loteamento
-    
-    Returns:
-        Dicionário com o CEP selecionado ou o primeiro resultado se nenhuma correspondência
     """
-    
     if not resultados_cep:
         return None
     
     if len(resultados_cep) == 1:
         return resultados_cep[0]
     
-    # Extrai termos significativos do loteamento
     termos_lote = set(extrair_termos_significativos(loteamento))
     
     st.info(f"🔍 Comparando {len(resultados_cep)} resultados de CEP com loteamento: **{loteamento}**")
@@ -134,7 +115,6 @@ def selecionar_cep_por_loteamento(resultados_cep, loteamento):
     with st.expander("📊 Detalhes da Comparação de Loteamentos", expanded=False):
         st.write(f"**Termos significativos do loteamento:** {termos_lote if termos_lote else 'Nenhum'}")
         
-        # Mostra cada resultado e sua pontuação
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -154,13 +134,10 @@ def selecionar_cep_por_loteamento(resultados_cep, loteamento):
                 coincidencias = termos_lote.intersection(termos_bairro)
                 st.write(f"{len(coincidencias)} termos")
     
-    # Calcula pontuação para cada resultado baseada em coincidências
     pontuacoes = []
     
     for idx, resultado in enumerate(resultados_cep):
         termos_bairro = set(extrair_termos_significativos(resultado.get('bairro', '')))
-        
-        # Conta coincidências entre loteamento e bairro
         coincidencias = termos_lote.intersection(termos_bairro)
         pontuacao = len(coincidencias)
         
@@ -171,10 +148,8 @@ def selecionar_cep_por_loteamento(resultados_cep, loteamento):
             'coincidencias': coincidencias
         })
     
-    # Ordena por pontuação (maior primeiro)
     pontuacoes_ordenadas = sorted(pontuacoes, key=lambda x: x['pontuacao'], reverse=True)
     
-    # Se encontrou correspondência, usa o primeiro
     if pontuacoes_ordenadas[0]['pontuacao'] > 0:
         resultado_selecionado = pontuacoes_ordenadas[0]
         cep_formatado = formatar_cep(resultado_selecionado['resultado'].get('cep'))
@@ -186,7 +161,6 @@ def selecionar_cep_por_loteamento(resultados_cep, loteamento):
         )
         return resultado_selecionado['resultado']
     else:
-        # Se não encontrou correspondência, usa o primeiro resultado
         cep_formatado = formatar_cep(resultados_cep[0].get('cep'))
         st.warning(
             f"⚠️ Nenhuma correspondência encontrada. "
@@ -199,15 +173,7 @@ def limpar_rua_para_cep(rua):
     """
     Limpa o nome da rua para busca de CEP.
     Extrai apenas o ÚLTIMO termo significativo, ignorando direções como Norte, Sul, Leste, Oeste.
-    
-    Exemplos:
-    - "AV. DOS IMIGRANTES SUL" -> "IMIGRANTES"
-    - "RUA DAS FLORES NORTE" -> "FLORES"
-    - "AVENIDA PAULISTA LESTE" -> "PAULISTA"
-    - "RUA JOSE DE ALENCAR OESTE" -> "ALENCAR"
     """
-    
-    # Lista de termos a ignorar (direções e preposições)
     termos_ignorar = [
         'norte', 'sul', 'leste', 'oeste',
         'n', 's', 'l', 'o',
@@ -218,68 +184,141 @@ def limpar_rua_para_cep(rua):
     if not rua:
         return ""
     
-    # Remove números
     rua_limpa = re.sub(r'\d+', '', str(rua)).strip()
-    
-    # Remove caracteres especiais, mantendo apenas letras e espaços
     rua_limpa = re.sub(r'[^\w\s]', ' ', rua_limpa)
-    
-    # Remove espaços múltiplos
     rua_limpa = re.sub(r'\s+', ' ', rua_limpa).strip()
     
-    # Separa em palavras
     palavras = rua_limpa.upper().split()
     
     if not palavras:
         return ""
     
-    # Remove termos a ignorar do final para o início
-    # Mantemos apenas as palavras significativas
     palavras_significativas = []
     
     for palavra in reversed(palavras):
-        # Se a palavra não está na lista de ignorar, adicionamos
         if palavra.lower() not in termos_ignorar:
             palavras_significativas.append(palavra)
-        # Se já temos uma palavra significativa e encontramos uma para ignorar, paramos
         elif palavras_significativas:
             break
     
-    # Inverte para manter ordem original
     palavras_significativas.reverse()
     
     resultado = ' '.join(palavras_significativas)
     
     return resultado if resultado else rua_limpa
 
+def buscar_cep_viacep(rua_limpa, cidade_limpa, estado_limpo):
+    """
+    Busca CEP via ViaCEP com múltiplos proxies.
+    """
+    try:
+        url_viacep = f"https://viacep.com.br/ws/{estado_limpo}/{cidade_limpa}/{rua_limpa}/json/"
+        
+        proxies = [
+            ("allorigins", "https://api.allorigins.win/raw"),
+            ("corsfix", "https://cors-anywhere.herokuapp.com/"),
+        ]
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        # Tenta com proxies
+        for proxy_nome, proxy_url in proxies:
+            try:
+                if "allorigins" in proxy_url:
+                    response = requests.get(
+                        proxy_url,
+                        params={"url": url_viacep},
+                        headers=headers,
+                        timeout=10
+                    )
+                else:
+                    response = requests.get(
+                        proxy_url + url_viacep,
+                        headers=headers,
+                        timeout=10
+                    )
+                
+                if response.status_code == 200:
+                    dados = response.json()
+                    if isinstance(dados, (list, dict)) and not (isinstance(dados, dict) and 'erro' in dados):
+                        st.info(f"✅ CEP encontrado via ViaCEP ({proxy_nome})")
+                        return dados
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                continue
+            except Exception:
+                continue
+        
+        # Tenta conexão direta
+        try:
+            response = requests.get(url_viacep, headers=headers, timeout=10)
+            if response.status_code == 200:
+                dados = response.json()
+                if isinstance(dados, (list, dict)) and not (isinstance(dados, dict) and 'erro' in dados):
+                    st.info("✅ CEP encontrado via ViaCEP (conexão direta)")
+                    return dados
+        except:
+            pass
+        
+        return None
+    
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao buscar via ViaCEP: {str(e)}")
+        return None
+
+def buscar_cep_brasilapi(rua_limpa, cidade_limpa, estado_limpo):
+    """
+    Busca CEP via BrasilAPI como alternativa.
+    BrasilAPI usa múltiplos provedores automaticamente.
+    """
+    try:
+        # BrasilAPI v2 - busca por endereço
+        # Formato: /api/address/v2/{state}/{city}/{street}
+        url_brasilapi = f"https://brasilapi.com.br/api/address/v2/{estado_limpo}/{cidade_limpa}/{rua_limpa}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        response = requests.get(url_brasilapi, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            dados = response.json()
+            
+            # BrasilAPI retorna lista ou objeto único
+            if isinstance(dados, list) and len(dados) > 0:
+                st.info("✅ CEP encontrado via BrasilAPI")
+                return dados
+            elif isinstance(dados, dict) and 'bairro' in dados:
+                st.info("✅ CEP encontrado via BrasilAPI")
+                return [dados]
+        
+        return None
+    
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao buscar via BrasilAPI: {str(e)}")
+        return None
+
 def buscar_cep_por_endereco(rua, cidade, estado, loteamento=""):
     """
-    Busca o CEP através da API do ViaCEP usando apenas rua, cidade e estado.
+    Busca o CEP usando ViaCEP e BrasilAPI como fallback.
     Se houver múltiplos resultados, seleciona baseado no loteamento.
-    
-    Args:
-        rua: Nome da rua/avenida (pode conter direções)
-        cidade: Cidade
-        estado: Estado (UF - 2 letras)
-        loteamento: Nome do loteamento (para comparação)
-    
-    Returns:
-        CEP formatado (XXXXX-XXX) ou vazio se não encontrado
     """
     try:
         if not rua or not cidade or not estado:
             st.warning("⚠️ Dados insuficientes para buscar CEP (rua, cidade ou estado vazio)")
             return ""
         
-        # Limpa a rua usando a nova função
+        # Verifica cache
+        chave_cache = f"{rua}|{cidade}|{estado}".upper()
+        if chave_cache in st.session_state['cache_ceps']:
+            st.info(f"📦 CEP obtido do cache")
+            return st.session_state['cache_ceps'][chave_cache]
+        
         rua_limpa = limpar_rua_para_cep(rua)
-        
         cidade_limpa = str(cidade).strip().upper()
-        estado_limpo = str(estado).strip().upper()
-        
-        # Garante que o estado tem apenas 2 letras
-        if len(estado_limpo) > 2:
-            estado_limpo = estado_limpo[:2]
+        estado_limpo = str(estado).strip().upper()[:2]
         
         if not rua_limpa or len(rua_limpa) < 3:
             st.warning(f"⚠️ Nome da rua muito curto após limpeza: '{rua_limpa}'")
@@ -303,71 +342,47 @@ def buscar_cep_por_endereco(rua, cidade, estado, loteamento=""):
                 st.write(f"- Estado: `{estado_limpo}`")
                 st.info("ℹ️ Termos de direção (N, S, L, O) foram removidos do nome da rua")
         
-        # API ViaCEP - busca por endereço
-        # Formato: https://viacep.com.br/ws/[UF]/[cidade]/[logradouro]/json/
-        # API ViaCEP original
-        url_viacep = f"https://viacep.com.br/ws/{estado_limpo}/{cidade_limpa}/{rua_limpa}/json/"
+        dados = None
         
-        st.info(f"🌐 Buscando CEP via Proxy Seguro...")
+        # 1. Tenta ViaCEP primeiro
+        st.info("🌐 Buscando CEP via ViaCEP...")
+        dados = buscar_cep_viacep(rua_limpa, cidade_limpa, estado_limpo)
         
-        # 1. Configurando o Proxy AllOrigins
-        url_proxy = "https://api.allorigins.win/raw"
-        parametros = {"url": url_viacep}
+        # 2. Se ViaCEP falhou, tenta BrasilAPI
+        if dados is None:
+            st.warning("⚠️ ViaCEP indisponível, tentando BrasilAPI...")
+            dados = buscar_cep_brasilapi(rua_limpa, cidade_limpa, estado_limpo)
         
-        # 2. Mantemos o User-Agent por garantia
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        # 3. Se ambas falharam
+        if dados is None:
+            st.error(f"❌ CEP não encontrado para: {rua_limpa}, {cidade_limpa} - {estado_limpo}")
+            st.warning("Nenhuma API de CEP disponível. Tente novamente mais tarde.")
+            return ""
         
-        # 3. Fazendo a requisição através do proxy (aumentei o timeout para 10s pois o proxy adiciona um pequeno atraso)
-        response = requests.get(url_proxy, params=parametros, headers=headers, timeout=10)
-        
-        st.info(f"📡 Status HTTP (Proxy): {response.status_code}")
-        
-        if response.status_code == 200:
-            dados = response.json()
+        # Processa resultados
+        if isinstance(dados, list) and len(dados) > 0:
+            st.success(f"✅ {len(dados)} resultado(s) encontrado(s)")
             
-            with st.expander("📋 Resposta da API (JSON)", expanded=False):
-                st.json(dados)
+            # Se há múltiplos resultados, seleciona baseado no loteamento
+            if len(dados) > 1 and loteamento:
+                resultado_selecionado = selecionar_cep_por_loteamento(dados, loteamento)
+            else:
+                resultado_selecionado = dados[0]
             
-            # Verifica se retornou um erro
-            if isinstance(dados, dict) and 'erro' in dados:
-                st.error(f"❌ CEP não encontrado para: {rua_limpa}, {cidade_limpa} - {estado_limpo}")
-                st.warning("A API retornou um erro. Verifique se a rua, cidade e estado estão corretos.")
-                return ""
-            
-            # Se é uma lista (múltiplos resultados)
-            if isinstance(dados, list) and len(dados) > 0:
-                st.success(f"✅ {len(dados)} resultado(s) encontrado(s)")
+            cep = resultado_selecionado.get('cep', '')
+            if cep:
+                cep_formatado = formatar_cep(cep)
+                st.success(f"✅ CEP selecionado: {cep_formatado}")
                 
-                # Se há múltiplos resultados, seleciona baseado no loteamento
-                if len(dados) > 1 and loteamento:
-                    resultado_selecionado = selecionar_cep_por_loteamento(dados, loteamento)
-                else:
-                    resultado_selecionado = dados[0]
+                # Salva no cache
+                st.session_state['cache_ceps'][chave_cache] = cep_formatado
                 
-                cep = resultado_selecionado.get('cep', '')
-                if cep:
-                    # Formata CEP corretamente
-                    cep_formatado = formatar_cep(cep)
-                    st.success(f"✅ CEP selecionado: {cep_formatado}")
-                    st.info(f"📍 Endereço: {resultado_selecionado.get('logradouro', '')}, {resultado_selecionado.get('bairro', '')}")
-                    return cep_formatado
-            
-            # Se for um dicionário único
-            elif isinstance(dados, dict):
-                cep = dados.get('cep', '')
-                if cep:
-                    cep_formatado = formatar_cep(cep)
-                    st.success(f"✅ CEP encontrado: {cep_formatado}")
-                    st.info(f"📍 Endereço: {dados.get('logradouro', '')}, {dados.get('bairro', '')}")
-                    return cep_formatado
+                return cep_formatado
         
-        st.error(f"❌ Erro ao buscar CEP (Status HTTP: {response.status_code})")
         return ""
     
     except requests.exceptions.Timeout:
-        st.error(f"⏱️ Timeout ao buscar CEP (aguardou mais de 5 segundos)")
+        st.error(f"⏱️ Timeout ao buscar CEP")
         return ""
     except requests.exceptions.RequestException as e:
         st.error(f"⚠️ Erro de conexão ao buscar CEP: {str(e)}")
@@ -381,46 +396,28 @@ def obter_pasta_origem(uploaded_file):
     Tenta obter a pasta de origem do arquivo carregado.
     """
     try:
-        # Streamlit não fornece acesso direto ao caminho do arquivo
-        # Tentamos obter através do atributo name
-        if hasattr(uploaded_file, 'name'):
-            # O arquivo tem um nome, tentamos usar Desktop como padrão
-            home = str(Path.home())
-            desktop = Path(home) / "Desktop"
-            
-            if desktop.exists():
-                return str(desktop)
-            
-            # Se Desktop não existe, usa a pasta do usuário
-            return home
+        home = str(Path.home())
+        desktop = Path(home) / "Desktop"
+        
+        if desktop.exists():
+            return str(desktop)
+        
+        return home
     except:
         pass
     
-    # Retorna None se não conseguir determinar
     return None
 
 def salvar_arquivo_xlsx(arquivo_bytes, nome_arquivo, pasta_destino):
     """
     Salva o arquivo XLSX na pasta especificada.
-    
-    Args:
-        arquivo_bytes: BytesIO com os dados do arquivo
-        nome_arquivo: Nome do arquivo a salvar
-        pasta_destino: Caminho da pasta destino
-    
-    Returns:
-        Caminho completo do arquivo salvo ou None se houver erro
     """
     try:
         pasta_path = Path(pasta_destino)
-        
-        # Cria a pasta se não existir
         pasta_path.mkdir(parents=True, exist_ok=True)
         
-        # Caminho completo do arquivo
         caminho_completo = pasta_path / nome_arquivo
         
-        # Salva o arquivo
         with open(caminho_completo, 'wb') as f:
             f.write(arquivo_bytes.getvalue())
         
@@ -431,6 +428,7 @@ def salvar_arquivo_xlsx(arquivo_bytes, nome_arquivo, pasta_destino):
         return None
 
 def extract_data_from_document(prompt_text, uploaded_file, api_key):
+    """Extrai dados de um único documento usando visão."""
     client = OpenAI(api_key=api_key)
     user_content = [{"type": "text", "text": prompt_text}]
     
@@ -451,17 +449,21 @@ def extract_data_from_document(prompt_text, uploaded_file, api_key):
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
             doc.close()
         except Exception as e:
-            raise ValueError(f"Erro ao processar o PDF da Matrícula/Identificação: {e}")
+            raise ValueError(f"Erro ao processar o PDF: {e}")
 
     response = client.chat.completions.create(
         model=MODEL,
-        messages=[{"role": "system", "content": "Retorne estritamente JSON válido."}, {"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": "Retorne estritamente JSON válido."},
+            {"role": "user", "content": user_content}
+        ],
         response_format={"type": "json_object"},
         temperature=0.1
     )
     return json.loads(response.choices[0].message.content)
 
 def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
+    """Extrai dados de múltiplos documentos usando visão."""
     client = OpenAI(api_key=api_key)
     user_content = [{"type": "text", "text": prompt_text}]
     
@@ -482,11 +484,14 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
                 doc.close()
             except Exception as e:
-                raise ValueError(f"Erro ao processar o PDF do Projeto: {e}")
+                raise ValueError(f"Erro ao processar o PDF: {e}")
     
     response = client.chat.completions.create(
-        model=MODEL, 
-        messages=[{"role": "system", "content": "Retorne estritamente JSON válido."}, {"role": "user", "content": user_content}], 
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Retorne estritamente JSON válido."},
+            {"role": "user", "content": user_content}
+        ],
         response_format={"type": "json_object"},
         temperature=0.1
     )
@@ -522,11 +527,11 @@ def criar_contexto_dados(dados):
     agora = datetime.now()
     meses = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
     
-    # Busca CEP automaticamente usando apenas rua, cidade e estado
-    rua = str(mat.get('confrontacao_frente', '')).strip()  # Usa confrontacao_frente como rua
+    # Busca CEP automaticamente
+    rua = str(mat.get('confrontacao_frente', '')).strip()
     cidade = str(mat.get('cidade', '')).strip().upper()
     estado = str(mat.get('estado', '')).strip().upper()
-    loteamento = str(mat.get('loteamento', '')).strip()  # Adiciona loteamento para comparação
+    loteamento = str(mat.get('loteamento', '')).strip()
     
     cep = ""
     if rua and cidade and estado:
@@ -573,7 +578,7 @@ def criar_contexto_dados(dados):
         'tipo_forro': str(prj.get('tipo_forro', '')).upper(),
         'altura_maxima': prj.get('altura_maxima', ''),
         'endereco_obra': str(prj.get('endereco_obra', '')).upper(),
-        'cep': cep,  # CEP buscado automaticamente
+        'cep': cep,
         
         'data_atual': agora.strftime("%d/%m/%Y"),
         'data_extensa': f"Sorriso - MT, {agora.day:02d} de {meses[agora.month]} de {agora.year}"
@@ -591,15 +596,12 @@ def gerar_arquivo_final(dados):
     proprietario_1 = contexto['proprietario_1']
     
     try:
-        # Carrega o modelo
         wb_completo = openpyxl.load_workbook(MODELO_ARQUIVO)
         
-        # Preenche TODAS as abas
         for nome_aba in wb_completo.sheetnames:
             ws = wb_completo[nome_aba]
             preencher_aba_com_tags(ws, contexto)
         
-        # Salva XLSX preenchido em BytesIO (para download)
         xlsx_preenchido_io = io.BytesIO()
         wb_completo.save(xlsx_preenchido_io)
         xlsx_preenchido_io.seek(0)
@@ -617,7 +619,7 @@ def gerar_arquivo_final(dados):
         raise Exception(f"Erro ao gerar arquivo: {str(e)}")
 
 # --- INTERFACE ---
-st.title("Automação Documental - Prefeituras")
+st.title("🏛️ Automação Documental - Prefeituras")
 st.markdown("*Selecione ou arraste os arquivos para extrair as informações e preencher os templates.*")
 st.success("✅ Arquivo será gerado em XLSX e salvo automaticamente na pasta de origem")
 
@@ -627,17 +629,17 @@ if not api_key:
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    f_mat = st.file_uploader("Matrícula do Imóvel", type=["pdf", "png", "jpg", "jpeg"], key="matricula")
+    f_mat = st.file_uploader("📋 Matrícula do Imóvel", type=["pdf", "png", "jpg", "jpeg"], key="matricula")
 with col2:
-    f_idf_1 = st.file_uploader("Documento de Identificação - Proprietário 1", type=["pdf", "png", "jpg", "jpeg"], key="idf_1")
+    f_idf_1 = st.file_uploader("🪪 Documento de Identificação - Proprietário 1", type=["pdf", "png", "jpg", "jpeg"], key="idf_1")
 with col3:
-    f_idf_2 = st.file_uploader("Documento de Identificação - Proprietário 2 (Opcional)", type=["pdf", "png", "jpg", "jpeg"], key="idf_2")
+    f_idf_2 = st.file_uploader("🪪 Documento de Identificação - Proprietário 2 (Opcional)", type=["pdf", "png", "jpg", "jpeg"], key="idf_2")
 
 col_prj = st.columns(1)[0]
 with col_prj:
-    f_prj = st.file_uploader("Pranchas Arquitetônicas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="projeto")
+    f_prj = st.file_uploader("📐 Pranchas Arquitetônicas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="projeto")
 
-if st.button("Processar e Gerar Documentos", type="primary"):
+if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_container_width=True):
     if not api_key:
         st.error("Por favor, insira a chave da OpenAI para continuar.")
         st.stop()
@@ -673,7 +675,7 @@ if st.button("Processar e Gerar Documentos", type="primary"):
         ),
     }
 
-    with st.spinner("Analisando documentos da prefeitura e preenchendo arquivo... Isso pode levar alguns segundos."):
+    with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo... Isso pode levar alguns segundos."):
         try:
             res_mat = extract_data_from_document(prompts["matricula"], f_mat, api_key) if f_mat else {}
             res_idf_1 = extract_data_from_document(prompts["identificacao"], f_idf_1, api_key) if f_idf_1 else {}
@@ -707,7 +709,7 @@ if st.button("Processar e Gerar Documentos", type="primary"):
             
             st.success("✅ Análise documental finalizada!")
         except Exception as e:
-            st.error(f"Erro no processamento: {e}")
+            st.error(f"❌ Erro no processamento: {e}")
             import traceback
             st.error(traceback.format_exc())
 
@@ -738,5 +740,5 @@ if st.session_state['dados_extraidos']:
 
     # --- DADOS EXTRAÍDOS ---
     st.divider()
-    with st.expander("Ver Dados Brutos Extraídos (JSON)"):
+    with st.expander("📋 Ver Dados Brutos Extraídos (JSON)", expanded=False):
         st.json(st.session_state['dados_extraidos'])
