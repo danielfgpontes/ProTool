@@ -12,7 +12,7 @@ import requests
 from pathlib import Path
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-5.4-mini"
+MODEL = "gpt-4o-mini"
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
@@ -30,6 +30,8 @@ if 'caminho_arquivo_salvo' not in st.session_state:
     st.session_state['caminho_arquivo_salvo'] = None
 if 'cache_ceps' not in st.session_state:
     st.session_state['cache_ceps'] = {}
+if 'tags_debug' not in st.session_state:
+    st.session_state['tags_debug'] = {}
 
 # --- FUNÇÕES AUXILIARES ---
 def extrair_apenas_numeros_area(valor):
@@ -500,15 +502,128 @@ def extract_data_from_multiple_files(prompt_text, uploaded_files, api_key):
 def preencher_aba_com_tags(ws, contexto):
     """
     Preenche uma aba inteira procurando por tags {{chave}} e substituindo pelos valores.
+    Versão melhorada com logging detalhado.
     """
+    tags_encontradas = {}
+    tags_substituidas = {}
+    
     for row in ws.iter_rows():
         for cell in row:
             if cell.value and isinstance(cell.value, str):
+                # Verifica todas as tags na célula
                 for k, v in contexto.items():
                     tag = "{{" + k + "}}"
                     if tag in cell.value:
                         texto_substituto = str(v) if v is not None else ""
+                        
+                        # Registra a tag encontrada
+                        if tag not in tags_encontradas:
+                            tags_encontradas[tag] = []
+                        tags_encontradas[tag].append({
+                            'celula': cell.coordinate,
+                            'conteudo_original': cell.value,
+                            'valor': texto_substituto
+                        })
+                        
+                        # Realiza a substituição
                         cell.value = cell.value.replace(tag, texto_substituto)
+                        
+                        # Registra como substituída
+                        if tag not in tags_substituidas:
+                            tags_substituidas[tag] = 0
+                        tags_substituidas[tag] += 1
+    
+    return tags_encontradas, tags_substituidas
+
+def gerar_arquivo_final(dados):
+    """
+    1. Carrega o modelo único
+    2. Preenche TODAS as abas com as tags
+    3. Salva o XLSX completo preenchido
+    Com logging detalhado para debug
+    """
+    contexto = criar_contexto_dados(dados)
+    proprietario_1 = contexto['proprietario_1']
+    
+    try:
+        # DEBUG: Mostra contexto carregado
+        with st.expander("🔍 DEBUG - Contexto Carregado", expanded=False):
+            st.json({
+                'proprietario_1': contexto.get('proprietario_1'),
+                'cep': contexto.get('cep'),
+                'cidade': contexto.get('cidade'),
+                'estado': contexto.get('estado'),
+                'loteamento': contexto.get('loteamento'),
+            })
+        
+        wb_completo = openpyxl.load_workbook(MODELO_ARQUIVO)
+        
+        todas_as_tags = {}
+        
+        # Preenche TODAS as abas
+        for nome_aba in wb_completo.sheetnames:
+            ws = wb_completo[nome_aba]
+            tags_encontradas, tags_substituidas = preencher_aba_com_tags(ws, contexto)
+            
+            # Armazena as tags desta aba
+            if tags_encontradas or tags_substituidas:
+                todas_as_tags[nome_aba] = {
+                    'encontradas': tags_encontradas,
+                    'substituidas': tags_substituidas
+                }
+        
+        # DEBUG: Mostra todas as tags processadas
+        with st.expander("📋 DEBUG - Tags Processadas por Aba", expanded=False):
+            if todas_as_tags:
+                for aba, dados_aba in todas_as_tags.items():
+                    st.write(f"### Aba: **{aba}**")
+                    st.write(f"Tags substituídas: {len(dados_aba['substituidas'])}")
+                    
+                    # Mostra detalhes de todas as substituições
+                    for tag, info in dados_aba['encontradas'].items():
+                        st.write(f"#### {tag} - {len(info)} ocorrência(s)")
+                        for idx, item in enumerate(info):
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.write(f"**Célula:** `{item['celula']}`")
+                            with col2:
+                                st.write(f"**Valor:** `{item['valor']}`")
+                            with col3:
+                                st.write(f"**Status:** ✅ Substituída")
+            else:
+                st.warning("⚠️ Nenhuma tag foi encontrada no modelo! Verifique o arquivo Excel.")
+        
+        # Salva XLSX preenchido em BytesIO
+        xlsx_preenchido_io = io.BytesIO()
+        wb_completo.save(xlsx_preenchido_io)
+        xlsx_preenchido_io.seek(0)
+        
+        wb_completo.close()
+        
+        # Verifica se {{cep}} foi encontrado e substituído
+        cep_encontrado = False
+        if todas_as_tags:
+            for aba_data in todas_as_tags.values():
+                if '{{cep}}' in aba_data['encontradas']:
+                    cep_encontrado = True
+                    break
+        
+        if not cep_encontrado:
+            st.warning("⚠️ Tag {{cep}} não foi encontrada no modelo. Verifique se existe no arquivo Excel com a escrita exata: {{cep}}")
+        
+        # Armazena debug em session state
+        st.session_state['tags_debug'] = todas_as_tags
+        
+        return {
+            'arquivo_xlsx': xlsx_preenchido_io,
+            'nome_proprietario': proprietario_1,
+            'tags_processadas': todas_as_tags
+        }
+    
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Arquivo '{MODELO_ARQUIVO}' não encontrado. Certifique-se de que o arquivo está na mesma pasta do script.")
+    except Exception as e:
+        raise Exception(f"Erro ao gerar arquivo: {str(e)}")
 
 def criar_contexto_dados(dados):
     """
@@ -552,9 +667,9 @@ def criar_contexto_dados(dados):
         'estado': estado,
         'area': extrair_apenas_numeros_area(mat.get('area', '')),
         'confrontacao_frente': rua.upper(),
-        'confrontacao_fundos': mat.get('confrontacao_fundos', ''),
-        'confrontacao_lado_direito': mat.get('confrontacao_lado_direito', ''),
-        'confrontacao_lado_esquerdo': mat.get('confrontacao_lado_esquerdo', ''),
+        'confrontacao_fundos': str(mat.get('confrontacao_fundos', '')).upper(),
+        'confrontacao_lado_direito': str(mat.get('confrontacao_lado_direito', '')).upper(),
+        'confrontacao_lado_esquerdo': str(mat.get('confrontacao_lado_esquerdo', '')).upper(),
 
         # Proprietário 1
         'proprietario_1': str(idf1.get('proprietario', '')).upper(),
@@ -574,9 +689,9 @@ def criar_contexto_dados(dados):
         'finalidade_obra': str(prj.get('finalidade_obra', '')).upper(),
         'desenhista': str(prj.get('desenhista', '')).upper(),
         'tipo_telhado': str(prj.get('tipo_telhado', '')).upper(),
-        'inclinacao_telhado': prj.get('inclinacao_telhado', ''),
+        'inclinacao_telhado': str(prj.get('inclinacao_telhado', '')).upper(),
         'tipo_forro': str(prj.get('tipo_forro', '')).upper(),
-        'altura_maxima': prj.get('altura_maxima', ''),
+        'altura_maxima': str(prj.get('altura_maxima', '')).upper(),
         'endereco_obra': str(prj.get('endereco_obra', '')).upper(),
         'cep': cep,
         
@@ -585,38 +700,6 @@ def criar_contexto_dados(dados):
     }
     
     return contexto
-
-def gerar_arquivo_final(dados):
-    """
-    1. Carrega o modelo único
-    2. Preenche TODAS as abas com as tags
-    3. Salva o XLSX completo preenchido
-    """
-    contexto = criar_contexto_dados(dados)
-    proprietario_1 = contexto['proprietario_1']
-    
-    try:
-        wb_completo = openpyxl.load_workbook(MODELO_ARQUIVO)
-        
-        for nome_aba in wb_completo.sheetnames:
-            ws = wb_completo[nome_aba]
-            preencher_aba_com_tags(ws, contexto)
-        
-        xlsx_preenchido_io = io.BytesIO()
-        wb_completo.save(xlsx_preenchido_io)
-        xlsx_preenchido_io.seek(0)
-        
-        wb_completo.close()
-        
-        return {
-            'arquivo_xlsx': xlsx_preenchido_io,
-            'nome_proprietario': proprietario_1
-        }
-    
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Arquivo '{MODELO_ARQUIVO}' não encontrado")
-    except Exception as e:
-        raise Exception(f"Erro ao gerar arquivo: {str(e)}")
 
 # --- INTERFACE ---
 st.title("🏛️ Automação Documental - Prefeituras")
@@ -641,11 +724,11 @@ with col_prj:
 
 if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_container_width=True):
     if not api_key:
-        st.error("Por favor, insira a chave da OpenAI para continuar.")
+        st.error("❌ Por favor, insira a chave da OpenAI para continuar.")
         st.stop()
     
     if not f_mat or not f_idf_1 or not f_prj:
-        st.error("Por favor, preencha os campos obrigatórios: Matrícula, Documento Proprietário 1 e Pranchas Arquitetônicas.")
+        st.error("❌ Por favor, preencha os campos obrigatórios: Matrícula, Documento Proprietário 1 e Pranchas Arquitetônicas.")
         st.stop()
     
     # Tenta obter pasta de origem
@@ -677,9 +760,17 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
 
     with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo... Isso pode levar alguns segundos."):
         try:
+            # PASSO 1: Extrai dados dos documentos
+            st.info("📄 Extraindo dados da Matrícula...")
             res_mat = extract_data_from_document(prompts["matricula"], f_mat, api_key) if f_mat else {}
+            
+            st.info("🪪 Extraindo dados do Proprietário 1...")
             res_idf_1 = extract_data_from_document(prompts["identificacao"], f_idf_1, api_key) if f_idf_1 else {}
+            
+            st.info("🪪 Extraindo dados do Proprietário 2...")
             res_idf_2 = extract_data_from_document(prompts["identificacao"], f_idf_2, api_key) if f_idf_2 else {}
+            
+            st.info("📐 Extraindo dados das Pranchas Arquitetônicas...")
             res_prj = extract_data_from_multiple_files(prompts["projeto"], f_prj, api_key) if f_prj else {}
             
             st.session_state['dados_extraidos'] = {
@@ -689,12 +780,14 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
                 "projeto": res_prj
             }
             
+            # PASSO 2: Gera arquivo com substituição de tags
+            st.info("📊 Preenchendo template e gerando XLSX...")
             resultado = gerar_arquivo_final(st.session_state['dados_extraidos'])
             
             st.session_state['arquivo_gerado'] = resultado['arquivo_xlsx']
             st.session_state['nome_proprietario'] = resultado['nome_proprietario'] if resultado['nome_proprietario'] else "DOC"
             
-            # Tenta salvar o arquivo na pasta de origem
+            # PASSO 3: Salva o arquivo
             if pasta_origem:
                 nome_arquivo = f"{st.session_state['nome_proprietario']}_Memorial_Planilha_Declaração_R00.xlsx"
                 caminho_salvo = salvar_arquivo_xlsx(st.session_state['arquivo_gerado'], nome_arquivo, pasta_origem)
@@ -708,6 +801,7 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
                 st.warning("⚠️ Não foi possível determinar a pasta de origem. Use o botão de download.")
             
             st.success("✅ Análise documental finalizada!")
+            
         except Exception as e:
             st.error(f"❌ Erro no processamento: {e}")
             import traceback
