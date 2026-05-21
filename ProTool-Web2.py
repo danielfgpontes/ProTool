@@ -507,7 +507,8 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
             "Analise a matrícula do imóvel (terreno) e extraia os seguintes dados em JSON com exatamente estas chaves: "
             "cnm, matricula, folha, cartorio, livro, data_registro, data_documento, "
             "loteamento, lote, quadra, cidade, estado, area (extraia APENAS o valor numérico, utilizando VÍRGULA como separador decimal, sem qualquer unidade de medida), "
-            "confrontacao_frente (descrição do limite frontal), confrontacao_fundos, confrontacao_lado_direito, confrontacao_lado_esquerdo."
+            "confrontacao_frente (Extraia APENAS o nome limpo da rua/avenida. IGNORE e REMOVA qualquer menção a medidas, distâncias ou palavras como 'medindo', 'com', 'metros'. Exemplo: retorne 'Rua Roterdã' e NUNCA 'Rua Roterdã, medindo 15,00 m'), "
+            "confrontacao_fundos, confrontacao_lado_direito, confrontacao_lado_esquerdo."
         ),
         "identificacao": (
             "Analise o documento de identificação do proprietário e extraia os seguintes dados em JSON com exatamente estas chaves: "
@@ -546,7 +547,11 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
             if mapa_disponivel:
                 st.info("📍 Cruzando coordenadas no mapa cadastral em memória...")
                 
-                rua_alvo = res_mat.get('confrontacao_frente')
+                # Pega a rua e aplica uma limpeza defensiva para remover vírgulas e a palavra "medindo"
+                rua_bruta = str(res_mat.get('confrontacao_frente', ''))
+                # Corta a string se achar uma vírgula ou a palavra 'medindo'
+                rua_alvo = re.split(r',|(?i)\smedindo', rua_bruta)[0].strip()
+                
                 lote_alvo = res_mat.get('lote')
                 quadra_alva = res_mat.get('quadra')
                 
