@@ -12,6 +12,11 @@ from datetime import datetime
 import requests
 from pathlib import Path
 
+# =========================================================
+# 1. ESTE COMANDO DEVE SER O PRIMEIRO DO STREAMLIT
+# =========================================================
+st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
+
 # Tratamento seguro caso o arquivo busca_cad.py não esteja no mesmo diretório durante testes
 try:
     from busca_cad import BuscaTripla
