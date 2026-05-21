@@ -27,7 +27,7 @@ except ImportError:
         def busca(self, rua, lote, quadra): return {'sucesso': False, 'zona_final': 'ZH2'}
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-4o-mini" # Corrigido para um modelo válido da OpenAI
+MODEL = "gpt-5.4-mini" # Corrigido para um modelo válido da OpenAI
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 CAMINHO_MAPA_DXF = "mapa_zoneamento4.dxf"
 
@@ -49,7 +49,7 @@ def inicializar_motor_busca():
 # Executa a função (ela só roda de fato na primeira vez que o app liga)
 motor_busca, mapa_disponivel = inicializar_motor_busca()
 
-st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
+
 
 # Inicialização do Session State para persistência
 if 'dados_extraidos' not in st.session_state:
