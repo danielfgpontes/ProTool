@@ -24,6 +24,47 @@ except ImportError:
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
 MODEL = "gpt-5.4-mini" # Recomendo manter um modelo válido atualizado
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
+CAMINHO_MAPA_DXF = "mapa_zoneamento4.dxf"
+
+@st.cache_resource(show_spinner="Carregando mapa cadastral na memória do servidor...")
+def inicializar_motor_busca():
+    """
+    Carrega o arquivo DXF e inicializa o motor geométrico apenas uma vez.
+    O resultado fica salvo na memória RAM (Cache) do Streamlit Cloud.
+    """
+    buscador = BuscaTripla()
+    
+    # Verifica se o arquivo existe no repositório
+    if os.path.exists(CAMINHO_MAPA_DXF):
+        sucesso = buscador.iniciar(CAMINHO_MAPA_DXF)
+        return buscador, True
+    else:
+        return buscador, False
+
+# Executa a função (ela só roda de fato na primeira vez que o app liga)
+motor_busca, mapa_disponivel = inicializar_motor_busca()
+
+# PASSO 2: Integração e cruzamento geoespacial via mapa DXF em Memória
+if mapa_disponivel:
+                st.info("📍 Cruzando coordenadas no mapa cadastral em memória...")
+                
+                rua_alvo = res_mat.get('confrontacao_frente')
+                lote_alvo = res_mat.get('lote')
+                quadra_alva = res_mat.get('quadra')
+                
+                # O motor_busca já está pronto e carregado do cache!
+                res_zona = motor_busca.busca(rua_alvo, lote_alvo, quadra_alva)
+                
+                if res_zona.get('sucesso'):
+                    st.session_state['zona_final'] = res_zona['zona_final']
+                    st.success(f"✅ Lote localizado! Zona encontrada: {res_zona['zona_final']}")
+                else:
+                    st.warning("⚠️ Lote não localizado geometricamente no DXF. Definida zona padrão: ZH2.")
+                    st.session_state['zona_final'] = "ZH2"
+else:
+                st.warning("⚠️ Arquivo DXF interno não encontrado no servidor. Definida zona padrão: ZH2.")
+                st.session_state['zona_final'] = "ZH2"
+
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
 
@@ -580,8 +621,6 @@ with col3:
 col_prj, col_dxf = st.columns(2)
 with col_prj:
     f_prj = st.file_uploader("📐 Pranchas Arquitetônicas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="projeto")
-with col_dxf:
-    f_dxf = st.file_uploader("🗺️ Mapa DXF (Zoneamento)", type=["dxf"], key="dxf_map")
 
 if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_container_width=True):
     if not api_key:
