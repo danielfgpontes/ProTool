@@ -25,7 +25,7 @@ except ImportError:
         def busca(self, rua, lote, quadra): return {'sucesso': False, 'zona_final': 'ZH2'}
 
 # --- CONFIGURAÇÃO DO MODELO ---
-MODEL = "gpt-4o-mini" 
+MODEL = "gpt-5.4-mini" 
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 CAMINHO_MAPA_DXF = "mapa_zoneamento4.dxf"
 
