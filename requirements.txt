@@ -5,3 +5,4 @@ Requests
 streamlit
 pathlib
 ezdxf
+shapely
