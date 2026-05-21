@@ -18,11 +18,11 @@ try:
 except ImportError:
     st.warning("⚠️ Módulo 'busca_cad' não encontrado no diretório. Usando classe simulada para contingência.")
     class BuscaTripla:
-        def iniciar(self, path): pass
+        def iniciar(self, path): return True
         def busca(self, rua, lote, quadra): return {'sucesso': False, 'zona_final': 'ZH2'}
 
 # --- CONFIGURAÇÃO INICIAL E MODELO ---
-MODEL = "gpt-5.4-mini" # Recomendo manter um modelo válido atualizado
+MODEL = "gpt-4o-mini" # Corrigido para um modelo válido da OpenAI
 MODELO_ARQUIVO = "MODELO_Memorial_Planilha_Declaração_R00.xlsx"
 CAMINHO_MAPA_DXF = "mapa_zoneamento4.dxf"
 
@@ -43,28 +43,6 @@ def inicializar_motor_busca():
 
 # Executa a função (ela só roda de fato na primeira vez que o app liga)
 motor_busca, mapa_disponivel = inicializar_motor_busca()
-
-# PASSO 2: Integração e cruzamento geoespacial via mapa DXF em Memória
-if mapa_disponivel:
-                st.info("📍 Cruzando coordenadas no mapa cadastral em memória...")
-                
-                rua_alvo = res_mat.get('confrontacao_frente')
-                lote_alvo = res_mat.get('lote')
-                quadra_alva = res_mat.get('quadra')
-                
-                # O motor_busca já está pronto e carregado do cache!
-                res_zona = motor_busca.busca(rua_alvo, lote_alvo, quadra_alva)
-                
-                if res_zona.get('sucesso'):
-                    st.session_state['zona_final'] = res_zona['zona_final']
-                    st.success(f"✅ Lote localizado! Zona encontrada: {res_zona['zona_final']}")
-                else:
-                    st.warning("⚠️ Lote não localizado geometricamente no DXF. Definida zona padrão: ZH2.")
-                    st.session_state['zona_final'] = "ZH2"
-else:
-                st.warning("⚠️ Arquivo DXF interno não encontrado no servidor. Definida zona padrão: ZH2.")
-                st.session_state['zona_final'] = "ZH2"
-
 
 st.set_page_config(page_title="Análise Documental - Prefeituras", layout="wide")
 
@@ -89,46 +67,27 @@ if 'zona_final' not in st.session_state:
 # --- FUNÇÕES AUXILIARES DE LIMPEZA E FORMATAÇÃO ---
 
 def formatar_numero_br(valor):
-    """
-    Remove letras/unidades e garante que o separador decimal seja estritamente a VÍRGULA.
-    Ex: "1.234.567,89 m²" -> "1234567,89"
-    Ex: "1234.56" -> "1234,56"
-    """
     if valor is None:
         return ""
-    
     valor_str = str(valor).strip()
-    
-    # Remove tudo que não for dígito, ponto ou vírgula (ex: m, m², %, letras)
     apenas_numeros = re.sub(r'[^\d.,]', '', valor_str)
-    
     if not apenas_numeros:
         return ""
-
     qtd_pontos = apenas_numeros.count('.')
     qtd_virgulas = apenas_numeros.count(',')
 
-    # Cenário 1: Tem ponto e vírgula (ex: 1.234,56 ou 1,234.56)
     if qtd_pontos > 0 and qtd_virgulas > 0:
         pos_ponto = apenas_numeros.rfind('.')
         pos_virgula = apenas_numeros.rfind(',')
         if pos_ponto > pos_virgula:
-            # Formato US (1,234.56) -> Remove vírgula, troca ponto por vírgula
             apenas_numeros = apenas_numeros.replace(',', '').replace('.', ',')
         else:
-            # Formato BR (1.234,56) -> Remove o ponto de milhar
             apenas_numeros = apenas_numeros.replace('.', '')
-            
-    # Cenário 2: Só tem ponto (ex: 1234.56 ou 1.234.567)
     elif qtd_pontos > 0:
-        # Se tem mais de um ponto ou o ponto não isola os 2/3 últimos dígitos, é separador de milhar
         if qtd_pontos > 1 or (len(apenas_numeros) - apenas_numeros.rfind('.') > 3 and len(apenas_numeros) > 4):
             apenas_numeros = apenas_numeros.replace('.', '')
         else:
-            # Se for casa decimal, converte o ponto para vírgula
             apenas_numeros = apenas_numeros.replace('.', ',')
-            
-    # Cenário 3: Só tem vírgula, mantemos a última se houver mais de uma
     elif qtd_virgulas > 1:
         partes = apenas_numeros.rsplit(',', 1)
         apenas_numeros = partes[0].replace(',', '') + ',' + partes[1]
@@ -179,25 +138,6 @@ def selecionar_cep_por_loteamento(resultados_cep, loteamento):
         return resultados_cep[0]
     
     termos_lote = set(extrair_termos_significativos(loteamento))
-    st.info(f"🔍 Comparando {len(resultados_cep)} resultados de CEP com loteamento: **{loteamento}**")
-    
-    with st.expander("📊 Detalhes da Comparação de Loteamentos", expanded=False):
-        st.write(f"**Termos significativos do loteamento:** {termos_lote if termos_lote else 'Nenhum'}")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.write("**Resultado**")
-            for idx in range(len(resultados_cep)):
-                st.write(f"`Opção {idx + 1}`")
-        with col2:
-            st.write("**Bairro**")
-            for resultado in resultados_cep:
-                st.write(f"{resultado.get('bairro', 'N/A')}")
-        with col3:
-            st.write("**Coincidências**")
-            for resultado in resultados_cep:
-                termos_bairro = set(extrair_termos_significativos(resultado.get('bairro', '')))
-                coincidencias = termos_lote.intersection(termos_bairro)
-                st.write(f"{len(coincidencias)} termos")
     
     pontuacoes = []
     for idx, resultado in enumerate(resultados_cep):
@@ -214,13 +154,8 @@ def selecionar_cep_por_loteamento(resultados_cep, loteamento):
     pontuacoes_ordenadas = sorted(pontuacoes, key=lambda x: x['pontuacao'], reverse=True)
     
     if pontuacoes_ordenadas[0]['pontuacao'] > 0:
-        resultado_selecionado = pontuacoes_ordenadas[0]
-        cep_formatado = formatar_cep(resultado_selecionado['resultado'].get('cep'))
-        st.success(f"✅ CEP selecionado (Opção {resultado_selecionado['indice'] + 1}): `{cep_formatado}` - **{resultado_selecionado['resultado'].get('bairro')}** ({resultado_selecionado['pontuacao']} coincidências)")
-        return resultado_selecionado['resultado']
+        return pontuacoes_ordenadas[0]['resultado']
     else:
-        cep_formatado = formatar_cep(resultados_cep[0].get('cep'))
-        st.warning(f"⚠️ Nenhuma correspondência encontrada. Usando primeiro resultado: `{cep_formatado}` - **{resultados_cep[0].get('bairro')}**")
         return resultados_cep[0]
 
 def limpar_rua_para_cep(rua):
@@ -252,69 +187,38 @@ def limpar_rua_para_cep(rua):
 def buscar_cep_viacep(rua_limpa, cidade_limpa, estado_limpo):
     try:
         url_viacep = f"https://viacep.com.br/ws/{estado_limpo}/{cidade_limpa}/{rua_limpa}/json/"
-        proxies = [
-            ("allorigins", "https://api.allorigins.win/raw"),
-            ("corsfix", "https://cors-anywhere.herokuapp.com/"),
-        ]
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        
-        for proxy_nome, proxy_url in proxies:
-            try:
-                if "allorigins" in proxy_url:
-                    response = requests.get(proxy_url, params={"url": url_viacep}, headers=headers, timeout=10)
-                else:
-                    response = requests.get(proxy_url + url_viacep, headers=headers, timeout=10)
-                
-                if response.status_code == 200:
-                    dados = response.json()
-                    if isinstance(dados, (list, dict)) and not (isinstance(dados, dict) and 'erro' in dados):
-                        st.info(f"✅ CEP encontrado via ViaCEP ({proxy_nome})")
-                        return dados
-            except:
-                continue
-        
-        try:
-            response = requests.get(url_viacep, headers=headers, timeout=10)
-            if response.status_code == 200:
-                dados = response.json()
-                if isinstance(dados, (list, dict)) and not (isinstance(dados, dict) and 'erro' in dados):
-                    st.info("✅ CEP encontrado via ViaCEP (conexão direta)")
-                    return dados
-        except:
-            pass
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url_viacep, headers=headers, timeout=10)
+        if response.status_code == 200:
+            dados = response.json()
+            if isinstance(dados, (list, dict)) and not (isinstance(dados, dict) and 'erro' in dados):
+                return dados
         return None
-    except Exception as e:
-        st.warning(f"⚠️ Erro ao buscar via ViaCEP: {str(e)}")
+    except:
         return None
 
 def buscar_cep_brasilapi(rua_limpa, cidade_limpa, estado_limpo):
     try:
         url_brasilapi = f"https://brasilapi.com.br/api/address/v2/{estado_limpo}/{cidade_limpa}/{rua_limpa}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url_brasilapi, headers=headers, timeout=10)
-        
         if response.status_code == 200:
             dados = response.json()
             if isinstance(dados, list) and len(dados) > 0:
-                st.info("✅ CEP encontrado via BrasilAPI")
                 return dados
             elif isinstance(dados, dict) and 'bairro' in dados:
-                st.info("✅ CEP encontrado via BrasilAPI")
                 return [dados]
         return None
-    except Exception as e:
-        st.warning(f"⚠️ Erro ao buscar via BrasilAPI: {str(e)}")
+    except:
         return None
 
 def buscar_cep_por_endereco(rua, cidade, estado, loteamento=""):
     try:
         if not rua or not cidade or not estado:
-            st.warning("⚠️ Dados insuficientes para buscar CEP (rua, cidade ou estado vazio)")
             return ""
         
         chave_cache = f"{rua}|{cidade}|{estado}".upper()
         if chave_cache in st.session_state['cache_ceps']:
-            st.info(f"📦 CEP obtido do cache")
             return st.session_state['cache_ceps'][chave_cache]
         
         rua_limpa = limpar_rua_para_cep(rua)
@@ -322,41 +226,24 @@ def buscar_cep_por_endereco(rua, cidade, estado, loteamento=""):
         estado_limpo = str(estado).strip().upper()[:2]
         
         if not rua_limpa or len(rua_limpa) < 3:
-            st.warning(f"⚠️ Nome da rua muito curto após limpeza: '{rua_limpa}'")
             return ""
         
-        with st.expander("🔍 Detalhes da Busca de CEP", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Dados Originais:**")
-                st.write(f"- Rua: `{rua}` | Cidade: `{cidade}` | Estado: `{estado}` | Loteamento: `{loteamento}`")
-            with col2:
-                st.write("**Dados Processados para API:**")
-                st.write(f"- Rua (limpa): `{rua_limpa}` | Cidade: `{cidade_limpa}` | Estado: `{estado_limpo}`")
-        
-        st.info("🌐 Buscando CEP via ViaCEP...")
         dados = buscar_cep_viacep(rua_limpa, cidade_limpa, estado_limpo)
-        
         if dados is None:
-            st.warning("⚠️ ViaCEP indisponível, tentando BrasilAPI...")
             dados = buscar_cep_brasilapi(rua_limpa, cidade_limpa, estado_limpo)
         
         if dados is None:
-            st.error(f"❌ CEP não encontrado para: {rua_limpa}, {cidade_limpa} - {estado_limpo}")
             return ""
         
         if isinstance(dados, list) and len(dados) > 0:
-            st.success(f"✅ {len(dados)} resultado(s) encontrado(s)")
             resultado_selecionado = selecionar_cep_por_loteamento(dados, loteamento) if len(dados) > 1 and loteamento else dados[0]
             cep = resultado_selecionado.get('cep', '')
             if cep:
                 cep_formatado = formatar_cep(cep)
-                st.success(f"✅ CEP selecionado: {cep_formatado}")
                 st.session_state['cache_ceps'][chave_cache] = cep_formatado
                 return cep_formatado
         return ""
-    except Exception as e:
-        st.error(f"⚠️ Erro inesperado ao buscar CEP: {str(e)}")
+    except:
         return ""
 
 def obter_pasta_origem(uploaded_file):
@@ -378,7 +265,7 @@ def salvar_arquivo_xlsx(arquivo_bytes, nome_arquivo, pasta_destino):
             f.write(arquivo_bytes.getvalue())
         return str(caminho_completo)
     except Exception as e:
-        st.error(f"Erro ao salvar arquivo localmente: {e}")
+        st.warning(f"Não foi possível salvar na pasta local do servidor (Ambiente Web).")
         return None
 
 def extract_data_from_document(prompt_text, uploaded_file, api_key):
@@ -551,16 +438,6 @@ def gerar_arquivo_final(dados, zona_dxf=None):
     proprietario_1 = contexto['proprietario_1']
     
     try:
-        with st.expander("🔍 DEBUG - Contexto Carregado", expanded=False):
-            st.json({
-                'proprietario_1': contexto.get('proprietario_1'),
-                'cep': contexto.get('cep'),
-                'zona_zoneamento': contexto.get('zona_zoneamento'),
-                'loteamento': contexto.get('loteamento'),
-                'area_formatada': contexto.get('area'),
-                'altura_formatada': contexto.get('altura_maxima')
-            })
-        
         wb_completo = openpyxl.load_workbook(MODELO_ARQUIVO)
         todas_as_tags = {}
         
@@ -572,17 +449,6 @@ def gerar_arquivo_final(dados, zona_dxf=None):
                     'encontradas': tags_encontradas,
                     'substituidas': tags_substituidas
                 }
-        
-        with st.expander("📋 DEBUG - Tags Processadas por Aba", expanded=False):
-            if todas_as_tags:
-                for aba, dados_aba in todas_as_tags.items():
-                    st.write(f"### Aba: **{aba}**")
-                    for tag, info in dados_aba['encontradas'].items():
-                        st.write(f"#### {tag} - {len(info)} ocorrência(s)")
-                        for item in info:
-                            st.write(f"- Célula: `{item['celula']}` | Valor Injetado: `{item['valor']}`")
-            else:
-                st.warning("⚠️ Nenhuma tag detectada ou preenchida. Verifique os delimitadores `{{ }}` no arquivo Excel.")
         
         xlsx_preenchido_io = io.BytesIO()
         wb_completo.save(xlsx_preenchido_io)
@@ -604,7 +470,6 @@ def gerar_arquivo_final(dados, zona_dxf=None):
 # --- INTERFACE STREAMLIT ---
 st.title("🏛️ Automação Documental - Prefeituras")
 st.markdown("*Selecione ou arraste os arquivos para extrair as informações e preencher os templates.*")
-st.success("✅ Arquivo será gerado em XLSX e salvo automaticamente na pasta de origem")
 
 api_key = st.text_input("OpenAI API Key (Deixe em branco se configurada no sistema):", type="password")
 if not api_key: 
@@ -614,13 +479,11 @@ col1, col2, col3 = st.columns(3)
 with col1:
     f_mat = st.file_uploader("📋 Matrícula do Imóvel", type=["pdf", "png", "jpg", "jpeg"], key="matricula")
 with col2:
-    f_idf_1 = st.file_uploader("🪪 Documento de Identificação - Proprietário 1", type=["pdf", "png", "jpg", "jpeg"], key="idf_1")
+    f_idf_1 = st.file_uploader("🪪 Documento Identificação - Proprietário 1", type=["pdf", "png", "jpg", "jpeg"], key="idf_1")
 with col3:
-    f_idf_2 = st.file_uploader("🪪 Documento de Identificação - Proprietário 2 (Opcional)", type=["pdf", "png", "jpg", "jpeg"], key="idf_2")
+    f_idf_2 = st.file_uploader("🪪 Documento Identificação - Proprietário 2 (Opcional)", type=["pdf", "png", "jpg", "jpeg"], key="idf_2")
 
-col_prj, col_dxf = st.columns(2)
-with col_prj:
-    f_prj = st.file_uploader("📐 Pranchas Arquitetônicas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="projeto")
+f_prj = st.file_uploader("📐 Pranchas Arquitetônicas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, key="projeto")
 
 if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_container_width=True):
     if not api_key:
@@ -639,10 +502,7 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
             "Analise a matrícula do imóvel (terreno) e extraia os seguintes dados em JSON com exatamente estas chaves: "
             "cnm, matricula, folha, cartorio, livro, data_registro, data_documento, "
             "loteamento, lote, quadra, cidade, estado, area (extraia APENAS o valor numérico, utilizando VÍRGULA como separador decimal, sem qualquer unidade de medida), "
-            "confrontacao_frente (descrição do limite frontal, ex: 'Av. dos Imigrantes Sul'), "
-            "confrontacao_fundos (descrição do limite dos fundos, ex: 'Lote 06 e 07'), "
-            "confrontacao_lado_direito (descrição do limite direito, ex: 'Lotes 19 e 20'), "
-            "confrontacao_lado_esquerdo (descrição do limite esquerdo, ex: 'Lotes 21 e 22')."
+            "confrontacao_frente (descrição do limite frontal), confrontacao_fundos, confrontacao_lado_direito, confrontacao_lado_esquerdo."
         ),
         "identificacao": (
             "Analise o documento de identificação do proprietário e extraia os seguintes dados em JSON com exatamente estas chaves: "
@@ -650,13 +510,13 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
         ),
         "projeto": (
             "Analise as pranchas arquitetônicas e extraia os seguintes dados em JSON com exatamente estas chaves: "
-            "area_construida_total (APENAS o valor numérico com vírgula como decimal, sem unidades), numero_pavimentos (apenas número inteiro), numero_vagas (apenas número inteiro), "
-            "finalidade_obra, desenhista, tipo_telhado, inclinacao_telhado (APENAS número, sem o símbolo %), tipo_forro, "
-            "altura_maxima (utilize como referência os desenhos de 'Corte' nas pranchas, extraia APENAS o número utilizando vírgula como decimal), endereco_obra."
+            "area_construida_total (APENAS valor numérico com vírgula como decimal), numero_pavimentos (apenas inteiro), numero_vagas (apenas inteiro), "
+            "finalidade_obra, desenhista, tipo_telhado, inclinacao_telhado (APENAS número, sem %), tipo_forro, "
+            "altura_maxima (utilize como referência os desenhos de 'Corte', extraia APENAS número com vírgula), endereco_obra."
         ),
     }
 
-    with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo... Isso pode levar alguns segundos."):
+    with st.spinner("⏳ Analisando documentos da prefeitura e preenchendo arquivo..."):
         try:
             # PASSO 1: Extrai dados dos documentos estruturados por IA
             st.info("📄 Extraindo dados da Matrícula...")
@@ -677,22 +537,15 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
                 "projeto": res_prj
             }
             
-            # PASSO 2: Integração e cruzamento geoespacial via mapa DXF
-            if f_dxf:
-                st.info("📍 Localizando lote no mapa cadastral DXF...")
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
-                    tmp.write(f_dxf.getvalue())
-                    tmp_path = tmp.name
-                
-                buscador = BuscaTripla()
-                buscador.iniciar(tmp_path)
+            # PASSO 2: Integração e cruzamento geoespacial via mapa DXF em Memória
+            if mapa_disponivel:
+                st.info("📍 Cruzando coordenadas no mapa cadastral em memória...")
                 
                 rua_alvo = res_mat.get('confrontacao_frente')
                 lote_alvo = res_mat.get('lote')
                 quadra_alva = res_mat.get('quadra')
                 
-                res_zona = buscador.busca(rua_alvo, lote_alvo, quadra_alva)
-                os.remove(tmp_path)
+                res_zona = motor_busca.busca(rua_alvo, lote_alvo, quadra_alva)
                 
                 if res_zona.get('sucesso'):
                     st.session_state['zona_final'] = res_zona['zona_final']
@@ -701,27 +554,23 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
                     st.warning("⚠️ Lote não localizado geometricamente no DXF. Definida zona padrão: ZH2.")
                     st.session_state['zona_final'] = "ZH2"
             else:
+                st.warning("⚠️ Arquivo DXF interno não encontrado no servidor. Definida zona padrão: ZH2.")
                 st.session_state['zona_final'] = "ZH2"
             
-            # PASSO 3: Geração do arquivo processando as tags e a zona obtida
+            # PASSO 3: Geração do arquivo processando as tags
             st.info("📊 Preenchendo template e gerando matriz XLSX...")
             resultado = gerar_arquivo_final(st.session_state['dados_extraidos'], st.session_state['zona_final'])
             
             st.session_state['arquivo_gerado'] = resultado['arquivo_xlsx']
             st.session_state['nome_proprietario'] = resultado['nome_proprietario'] if resultado['nome_proprietario'] else "DOC"
             
-            # PASSO 4: Salvamento Automatizado na pasta alvo
+            # PASSO 4: Salvamento
             if pasta_origem:
                 nome_arquivo = f"{st.session_state['nome_proprietario']}_Memorial_Planilha_Declaração_R00.xlsx"
                 caminho_salvo = salvar_arquivo_xlsx(st.session_state['arquivo_gerado'], nome_arquivo, pasta_origem)
-                
                 if caminho_salvo:
                     st.session_state['caminho_arquivo_salvo'] = caminho_salvo
-                    st.success(f"✅ Arquivo salvo automaticamente em:\n`{caminho_salvo}`")
-                else:
-                    st.warning("⚠️ Não foi possível salvar o arquivo automaticamente. Faça o download manual abaixo.")
-            else:
-                st.warning("⚠️ Não foi possível mapear a pasta de origem do arquivo de entrada. Faça o download manual.")
+                    st.success(f"✅ Arquivo salvo no servidor em:\n`{caminho_salvo}`")
             
             st.success("✅ Análise documental finalizada com sucesso!")
             
