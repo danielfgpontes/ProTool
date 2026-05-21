@@ -550,7 +550,7 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
                 # Pega a rua e aplica uma limpeza defensiva para remover vírgulas e a palavra "medindo"
                 rua_bruta = str(res_mat.get('confrontacao_frente', ''))
                 # Corta a string se achar uma vírgula ou a palavra 'medindo'
-                rua_alvo = re.split(r',|(?i)\smedindo', rua_bruta)[0].strip()
+                rua_alvo = re.split(r'(?i),|\smedindo', rua_bruta)[0].strip()
                 
                 lote_alvo = res_mat.get('lote')
                 quadra_alva = res_mat.get('quadra')
