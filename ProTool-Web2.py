@@ -357,7 +357,7 @@ if st.button("⚙️ Processar e Gerar Documentos", type="primary", use_containe
     prompts = {
         "matricula": "Analise a matrícula do imóvel e extraia os seguintes dados em JSON: cnm, matricula, folha, cartorio, livro, data_registro, data_documento, loteamento, lote, quadra, cidade, estado, area (apenas o número com vírgula), confrontacao_frente, confrontacao_fundos, confrontacao_lado_direito, confrontacao_lado_esquerdo.",
         "identificacao": "Analise o documento de identificação e extraia: proprietario (nome completo), cnpj_cpf.",
-        "projeto": "Analise as pranchas arquitetônicas e extraia em JSON: area_construida_total, numero_pavimentos, numero_vagas, finalidade_obra, desenhista, tipo_telhado, inclinacao_telhado, tipo_forro, altura_maxima, endereco_obra."
+        "projeto": "Analise as pranchas arquitetônicas e extraia em JSON: area_construida_total, numero_pavimentos, numero_vagas, finalidade_obra, desenhista, tipo_telhado (apenas tipo de telha ex: FIBROCIMENTO, METÁLICA, ISOTÉRMICA, CERÂMICA, BARRO, TERMOACÚSTICA), inclinacao_telhado, tipo_forro (apenas o tipo de forro ex: GESSO, PVC, LAJE), altura_maxima, endereco_obra."
     }
 
     with st.spinner("⏳ Processando inteligência artificial..."):
